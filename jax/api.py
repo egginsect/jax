@@ -45,6 +45,7 @@ from .interpreters import partial_eval as pe
 from .interpreters import xla
 from .interpreters import ad
 from .interpreters import batching
+from .interpreters import parallel
 
 map = safe_map
 zip = safe_zip
@@ -254,6 +255,36 @@ def vmap(fun, in_axes=0, out_axes=0):
     return build_tree(out_tree(), out_flat)
 
   return batched_fun
+
+
+def spmd(fun, axis_name, in_axes=0, out_axes=0):
+  """Vectorizing pseudo-map for single-program multiple-data (SPMD) functions."""
+  def spmd_fun(*args, **kwargs):
+    f = lu.wrap_init(fun, kwargs)
+    in_axes_ = (in_axes,) * len(args) if type(in_axes) is int else in_axes
+    in_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, args))
+    jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
+    out_flat = parallel.spmd(jaxtree_fun, axis_name, args, in_axes_, out_axes)
+    return build_tree(out_tree(), out_flat)
+
+  spmd_fun.axis_name = axis_name
+  return spmd_fun
+
+
+def papply(fun, in_axes=0):
+  """Apply a function using parallel computation by sharding inputs."""
+
+  def papply_fun(*args, **kwargs):
+    f = lu.wrap_init(fun, kwargs)
+    in_axes_ = (in_axes,) * len(args) if type(in_axes) is int else in_axes
+    args_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, args))
+    jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
+    out_flat = parallel.parallel_xla_call(jaxtree_fun, *args_flat,
+                                          in_axes=in_axes_)
+    return build_tree(out_tree(), out_flat)
+
+  return papply_fun
+
 
 def jvp(fun, primals, tangents):
   def trim_arg(primal, tangent):

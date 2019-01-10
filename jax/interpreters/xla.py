@@ -73,10 +73,11 @@ def aval_from_xla_shape(shape):
   return ShapedArray(shape.dimensions(), shape.element_type())
 
 def execute_compiled_primitive(compiled, result_handler, *args):
-  input_bufs = [device_put(canonicalize_pyval_dtype(x)) for x in args]
+  input_bufs = [device_put(x) for x in args]
   return result_handler(compiled.Execute(input_bufs, not core.skip_checks))
 
 def device_put(x):
+  x = canonicalize_pyval_dtype(x)
   if type(x) is DeviceArray:
     return x.device_buffer
   elif isinstance(x, DeviceConstant):
@@ -427,15 +428,18 @@ def xla_callable(fun, *abstract_args):
     return partial(execute_compiled, compiled, pval, handle_result)
 
 def execute_compiled(compiled, pval, handle_result, *args):
-  input_bufs = [device_put(canonicalize_pyval_dtype(x)) for x in args]
+  input_bufs = [device_put(x) for x in args]
   out_buf = compiled.Execute(input_bufs, not core.skip_checks)
   return merge_pvals(handle_result(out_buf), pval)
 
+
+def xla_call_translation_rule(c, subc_a1, *a2):
+  subc, a1 = subc_a1
+  return c.Call(subc, a1 + a2)
 
 xla_call_p = core.Primitive('xla_call')
 xla_call = partial(core.call_bind, xla_call_p)
 xla_call_p.def_custom_bind(xla_call)
 xla_call_p.def_impl(xla_call_impl)
 
-translations[xla_call_p] = lambda c, subc_a1, *a2: c.Call(subc_a1[0],
-                                                          subc_a1[1] + a2)
+translations[xla_call_p] = xla_call_translation_rule

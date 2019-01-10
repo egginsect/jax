@@ -41,6 +41,7 @@ def batch(fun, in_vals, in_dims, out_dim_target):
     return fun.call_wrapped(*in_vals), None  # no mapped dimensions
   elif len(sizes) == 1:
     out_val, out_dim = batch_transform(fun).call_wrapped(in_vals, in_dims)
+    assert out_dim is not None
     return moveaxis(sizes.pop(), out_dim_target, out_dim, out_val)
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
