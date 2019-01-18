@@ -39,11 +39,12 @@ def identity(x): return x
 ### spmd
 
 
-# The spmd code looks like the vmap code in batching.py, with the differences
-# being that (1) process_primitive handles special hidden-axis-reducer
-# primitives, and (2) the mapped axis is associated with a name.
+# The spmd code looks like the vmap code in batching.py, and even uses the same
+# set of rules for the most part, with the differences being that (1)
+# process_primitive handles special hidden-axis-reducer primitives, and (2) the
+# mapped axis is associated with a name.
 
-def spmd(fun, key, in_vals, in_axes, out_axis_target):
+def spmd(fun, name, in_vals, in_axes, out_axis_target):
   sizes = reduce(set.union, map(batching.dimsize, in_axes, in_vals))
   if not sizes:
     return fun.call_wrapped(*in_vals)
@@ -54,16 +55,16 @@ def spmd(fun, key, in_vals, in_axes, out_axis_target):
              "got axis size {} for {} replicas.")
       raise TypeError(msg.format(size, xb.get_replica_count()))
 
-    out_val, out_axis = spmd_transform(fun).call_wrapped(key, in_vals, in_axes)
+    out_val, out_axis = spmd_transform(fun).call_wrapped(name, in_vals, in_axes)
     return batching.moveaxis(size, out_axis_target, out_axis, out_val)
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
 
 @lu.transformation
-def spmd_transform(key, vals, axes):
+def spmd_transform(name, vals, axes):
   with new_master(SpmdTrace) as master:
     trace = SpmdTrace(master, core.cur_sublevel())
-    in_tracers = map(partial(SpmdTracer, trace, key), vals, axes)
+    in_tracers = map(partial(SpmdTracer, trace, name), vals, axes)
     ans = yield in_tracers
     out_tracer = trace.full_raise(ans)
     out_val, out_axis = out_tracer.val, out_tracer.axis
@@ -71,17 +72,17 @@ def spmd_transform(key, vals, axes):
   yield out_val, out_axis
 
 @lu.transformation_with_aux
-def spmd_subtrace(master, key, axes, *vals):
+def spmd_subtrace(master, name, axes, *vals):
   trace = SpmdTrace(master, core.cur_sublevel())
-  ans = yield map(partial(SpmdTracer, trace, key), vals, axes)
+  ans = yield map(partial(SpmdTracer, trace, name), vals, axes)
   out_tracer = trace.full_raise(ans)
   out_val, out_axis = out_tracer.val, out_tracer.axis
   yield out_val, out_axis
 
 class SpmdTracer(Tracer):
-  def __init__(self, trace, key, val, axis):
+  def __init__(self, trace, name, val, axis):
     self.trace = trace
-    self.key = key
+    self.name = name
     self.val = val
     self.axis = axis
 
@@ -100,7 +101,7 @@ class SpmdTracer(Tracer):
       return tuple(self.val)
     else:
       raise TypeError(t)
-    return map(partial(SpmdTracer, self.trace, self.key), self.val, axes)
+    return map(partial(SpmdTracer, self.trace, self.name), self.val, axes)
 
   def full_lower(self):
     if self.axis is None:
@@ -116,10 +117,10 @@ class SpmdTrace(Trace):
     return SpmdTracer(self, None, val, None)
 
   def sublift(self, val):
-    return SpmdTracer(self, val.key, val.val, val.axis)
+    return SpmdTracer(self, val.name, val.val, val.axis)
 
   def process_primitive(self, primitive, tracers, params):
-    keys_in, vals_in, axes_in = unzip3((t.key, t.val, t.axis) for t in tracers)
+    names_in, vals_in, axes_in = unzip3((t.name, t.val, t.axis) for t in tracers)
     if all(axis is None for axis in axes_in):
       return primitive.bind(*vals_in, **params)
     else:
@@ -128,28 +129,28 @@ class SpmdTrace(Trace):
         tracer, = tracers
         val, = vals_in
         axis, = axes_in
-        key = params['key']
+        name = params['name']
 
         assert axis is not None
-        if tracer.key == key:
+        if tracer.name == name:
           return spmd_collectives[primitive](val, axis)
         else:
-          return primitive.bind(tracer, key=key)
+          return primitive.bind(tracer, name=name)
       else:
         rule = batching.get_primitive_batcher(primitive)
         val_out, axis_out = rule(vals_in, axes_in, **params)
-        key = next(key for key in keys_in if key is not None)
-        return SpmdTracer(self, key, val_out, axis_out)
+        name = next(name for name in names_in if name is not None)
+        return SpmdTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
-    keys, vals, axes = unzpi3((t.key, t.val, t.axis) for t in tracers)
+    names, vals, axes = unzpi3((t.name, t.val, t.axis) for t in tracers)
     if all(axis is None for axis in axes):
       return call_primitive.bind(f, *vals, **params)
     else:
-      key = next(key for key in keys if key is not None)
-      f, axis_out = spmd_subtrace(f, self.master, key, axes)
+      name = next(name for name in names if name is not None)
+      f, axis_out = spmd_subtrace(f, self.master, name, axes)
       val_out = call_primitive.bind(f, *vals, **params)
-      return SpmdTracer(self, self.key, val_out, dim_out())
+      return SpmdTracer(self, self.name, val_out, dim_out())
 
   def post_process_call(self, _, out_tracer):
     raise NotImplementedError  # TODO(mattjj,dougalm)
@@ -157,13 +158,13 @@ class SpmdTrace(Trace):
   def pack(self, tracers):
     vals = pack([t.val for t in tracers])
     axis = tuple(t.axis for t in tracers)
-    return SpmdTracer(self, self.key, vals, axis)
+    return SpmdTracer(self, self.name, vals, axis)
 
 
 spmd_collectives = {}
 
 def collective_sum(x, axis_name):
-  return collective_sum_p.bind(x, key=axis_name)
+  return collective_sum_p.bind(x, name=axis_name)
 
 def collective_sum_spmd_rule(x, axis):
   if xb.get_replica_count() > 1:

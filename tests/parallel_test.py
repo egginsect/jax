@@ -34,34 +34,34 @@ class SpmdTest(jtu.JaxTestCase):
 
   def testConstantFunction(self):
     f = lambda x: 3
-    ans = spmd(f, axis_name='batch')(onp.ones(4))
+    ans = spmd(f, axis_name='i')(onp.ones(4))
     expected = 3 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testReduceSum(self):
-    f = lambda x: collective_sum(x, 'batch')
-    ans = spmd(f, axis_name='batch')(onp.ones(4))
+    f = lambda x: collective_sum(x, 'i')
+    ans = spmd(f, axis_name='i')(onp.ones(4))
     expected = 4 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testLogSoftmax(self):
 
     def f(x):
-      return x - np.log(collective_sum(np.exp(x), 'batch'))
+      return x - np.log(collective_sum(np.exp(x), 'i'))
 
     x = onp.log(onp.arange(10., dtype=onp.float32))
 
-    ans = spmd(f, axis_name='batch')(x)
+    ans = spmd(f, axis_name='i')(x)
     expected = x - onp.log(onp.sum(onp.exp(x)))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
 
-class PapplyTest(jtu.JaxTestCase):
+# class PapplyTest(jtu.JaxTestCase):
 
-  def testIdentity(self):
-    ans = papply(lambda x: x)(onp.arange(3))
-    expected = onp.arange(3)
-    self.assertAllClose(ans, expected, check_dtypes=False)
+#   def testIdentity(self):
+#     ans = papply(lambda x: x)(onp.arange(3))
+#     expected = onp.arange(3)
+#     self.assertAllClose(ans, expected, check_dtypes=False)
 
 
 if __name__ == '__main__':
