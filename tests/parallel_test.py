@@ -22,36 +22,36 @@ from absl.testing import parameterized
 
 import jax.numpy as np
 from jax import test_util as jtu
-from jax.api import spmd
+from jax.api import pmap
 from jax.api import papply
-from jax.interpreters.parallel import spmd_sum
+from jax.interpreters.parallel import pmap_sum
 
 from jax.config import config
 config.parse_flags_with_absl()
 
 
-class SpmdTest(jtu.JaxTestCase):
+class PmapTest(jtu.JaxTestCase):
 
   def testConstantFunction(self):
     f = lambda x: 3
-    ans = spmd(f, axis_name='i')(onp.ones(4))
+    ans = pmap(f, axis_name='i')(onp.ones(4))
     expected = 3 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testReduceSum(self):
-    f = lambda x: spmd_sum(x, 'i')
-    ans = spmd(f, axis_name='i')(onp.ones(4))
+    f = lambda x: pmap_sum(x, 'i')
+    ans = pmap(f, axis_name='i')(onp.ones(4))
     expected = 4 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testLogSoftmax(self):
 
     def f(x):
-      return x - np.log(spmd_sum(np.exp(x), 'i'))
+      return x - np.log(pmap_sum(np.exp(x), 'i'))
 
     x = onp.log(onp.arange(10., dtype=onp.float32))
 
-    ans = spmd(f, axis_name='i')(x)
+    ans = pmap(f, axis_name='i')(x)
     expected = x - onp.log(onp.sum(onp.exp(x)))
     self.assertAllClose(ans, expected, check_dtypes=False)
 

@@ -36,35 +36,35 @@ zip = safe_zip
 def identity(x): return x
 
 
-### spmd
+### pmap
 
-# The spmd code looks like the vmap code in batching.py, and even uses the same
+# The pmap code looks like the vmap code in batching.py, and even uses the same
 # set of rules, with the differences being that (1) process_primitive handles
 # special hidden-axis-reducer primitives, and (2) the mapped axis is associated
 # with a name (which is carried through the trace).
 
 
-def spmd(fun, name, in_vals, in_axes, out_axis_target):
+def pmap(fun, name, in_vals, in_axes, out_axis_target):
   sizes = reduce(set.union, map(batching.dimsize, in_axes, in_vals))
   if not sizes:
     return fun.call_wrapped(*in_vals)
   elif len(sizes) == 1:
     size = sizes.pop()
     if size % xb.get_replica_count():
-      msg = ("spmd requires mapped axis to be divisible by num_replicas, "
+      msg = ("pmap requires mapped axis to be divisible by num_replicas, "
              "got axis size {} for {} replicas.")
       raise TypeError(msg.format(size, xb.get_replica_count()))
 
-    out_val, out_axis = spmd_transform(fun).call_wrapped(name, in_vals, in_axes)
+    out_val, out_axis = pmap_transform(fun).call_wrapped(name, in_vals, in_axes)
     return batching.moveaxis(size, out_axis_target, out_axis, out_val)
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
 
 @lu.transformation
-def spmd_transform(name, vals, axes):
-  with new_master(SpmdTrace) as master:
-    trace = SpmdTrace(master, core.cur_sublevel())
-    in_tracers = map(partial(SpmdTracer, trace, name), vals, axes)
+def pmap_transform(name, vals, axes):
+  with new_master(PmapTrace) as master:
+    trace = PmapTrace(master, core.cur_sublevel())
+    in_tracers = map(partial(PmapTracer, trace, name), vals, axes)
     ans = yield in_tracers
     out_tracer = trace.full_raise(ans)
     out_val, out_axis = out_tracer.val, out_tracer.axis
@@ -72,14 +72,14 @@ def spmd_transform(name, vals, axes):
   yield out_val, out_axis
 
 @lu.transformation_with_aux
-def spmd_subtrace(master, name, axes, *vals):
-  trace = SpmdTrace(master, core.cur_sublevel())
-  ans = yield map(partial(SpmdTracer, trace, name), vals, axes)
+def pmap_subtrace(master, name, axes, *vals):
+  trace = PmapTrace(master, core.cur_sublevel())
+  ans = yield map(partial(PmapTracer, trace, name), vals, axes)
   out_tracer = trace.full_raise(ans)
   out_val, out_axis = out_tracer.val, out_tracer.axis
   yield out_val, out_axis
 
-class SpmdTracer(Tracer):
+class PmapTracer(Tracer):
   def __init__(self, trace, name, val, axis):
     self.trace = trace
     self.name = name
@@ -101,7 +101,7 @@ class SpmdTracer(Tracer):
       return tuple(self.val)
     else:
       raise TypeError(t)
-    return map(partial(SpmdTracer, self.trace, self.name), self.val, axes)
+    return map(partial(PmapTracer, self.trace, self.name), self.val, axes)
 
   def full_lower(self):
     if self.axis is None:
@@ -109,15 +109,15 @@ class SpmdTracer(Tracer):
     else:
       return self
 
-class SpmdTrace(Trace):
+class PmapTrace(Trace):
   def pure(self, val):
-    return SpmdTracer(self, None, val, None)
+    return PmapTracer(self, None, val, None)
 
   def lift(self, val):
-    return SpmdTracer(self, None, val, None)
+    return PmapTracer(self, None, val, None)
 
   def sublift(self, val):
-    return SpmdTracer(self, val.name, val.val, val.axis)
+    return PmapTracer(self, val.name, val.val, val.axis)
 
   def process_primitive(self, primitive, tracers, params):
     names_in, vals_in, axes_in = unzip3((t.name, t.val, t.axis) for t in tracers)
@@ -125,7 +125,7 @@ class SpmdTrace(Trace):
       return primitive.bind(*vals_in, **params)
     else:
       # act just like vmap except when we hit a collective reduction
-      if primitive in spmd_primitive_rules:
+      if primitive in pmap_primitive_rules:
         tracer, = tracers
         val, = vals_in
         axis, = axes_in
@@ -133,14 +133,14 @@ class SpmdTrace(Trace):
 
         assert axis is not None
         if tracer.name == name:
-          return spmd_primitive_rules[primitive](val, axis)
+          return pmap_primitive_rules[primitive](val, axis)
         else:
           return primitive.bind(val, axis_name=name)
       else:
         rule = batching.get_primitive_batcher(primitive)
         val_out, axis_out = rule(vals_in, axes_in, **params)
         name = next(name for name in names_in if name is not None)
-        return SpmdTracer(self, name, val_out, axis_out)
+        return PmapTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
     # TODO do something special for xla_call if it's abstracted over 'name'
@@ -149,9 +149,9 @@ class SpmdTrace(Trace):
       return call_primitive.bind(f, *vals, **params)
     else:
       name = next(name for name in names if name is not None)
-      f, axis_out = spmd_subtrace(f, self.master, name, axes)
+      f, axis_out = pmap_subtrace(f, self.master, name, axes)
       val_out = call_primitive.bind(f, *vals, **params)
-      return SpmdTracer(self, self.name, val_out, axis_out())
+      return PmapTracer(self, self.name, val_out, axis_out())
 
   def post_process_call(self, _, out_tracer):
     raise NotImplementedError  # TODO(mattjj,dougalm)
@@ -159,26 +159,26 @@ class SpmdTrace(Trace):
   def pack(self, tracers):
     vals = pack([t.val for t in tracers])
     axis = tuple(t.axis for t in tracers)
-    return SpmdTracer(self, self.name, vals, axis)
+    return PmapTracer(self, self.name, vals, axis)
 
 
 def unbound_name_error(x, axis_name):
   raise NameError("axis name '{}' is unbound".format(axis_name))
 
-def SpmdPrimitive(name):
+def PmapPrimitive(name):
   prim = Primitive(name)
   prim.def_impl(unbound_name_error)
   return prim
 
 
-spmd_primitive_rules = {}
+pmap_primitive_rules = {}
 
 
-def spmd_sum(x, axis_name):
-  return spmd_sum_p.bind(x, axis_name=axis_name)
+def pmap_sum(x, axis_name):
+  return pmap_sum_p.bind(x, axis_name=axis_name)
 
-spmd_sum_p = SpmdPrimitive('spmd_sum')
-spmd_primitive_rules[spmd_sum_p] = lambda val, axis: val.sum(axis)
+pmap_sum_p = PmapPrimitive('pmap_sum')
+pmap_primitive_rules[pmap_sum_p] = lambda val, axis: val.sum(axis)
 
 
 # def cross_replica_sum(x):
