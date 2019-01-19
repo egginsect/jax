@@ -243,8 +243,9 @@ class PapplyTrace(Trace):
     if all(axis is None for axis in axes):
       return primitive.bind(*vals, **params)
     else:
+      name = next(n for n in names if n is not None)
       rule = papply_primitive_rules[primitive]
-      name, val, axis = rule(names, vals, axes)
+      val, axis = rule(name, vals, axes)
       return PapplyTracer(self, name, val, axis)
 
   def process_call(self, call_primitive, f, tracers, params):
@@ -266,9 +267,9 @@ papply_primitive_rules = {}
 def defvectorized(prim):
   papply_primitive_rules[prim] = partial(vectorized_papply, prim)
 
-def vectorized_papply(prim, vals, dims, **params):
-  assert all(dims[0] == d for d in dims[1:])
-  return prim.bind(*vals, **params), dims[0]
+def vectorized_papply(prim, name, vals, axes, **params):
+  assert all(axes[0] == a for a in axes[1:])
+  return prim.bind(*vals, **params), axes[0]
 
 
 

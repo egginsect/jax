@@ -40,6 +40,7 @@ from .interpreters import partial_eval as pe
 from .interpreters import xla
 from .interpreters import ad
 from .interpreters import batching
+from .interpreters import parallel
 from .util import curry, safe_zip, unzip2, prod
 from .tree_util import build_tree
 from .lib import xla_bridge
@@ -758,6 +759,7 @@ def unop(result_dtype, accepted_dtypes, name):
   dtype_rule = partial(unop_dtype_rule, result_dtype, accepted_dtypes, name)
   prim = standard_primitive(_attrgetter('shape'), dtype_rule, name)
   batching.defvectorized(prim)
+  parallel.defvectorized(prim)
   return prim
 standard_unop = partial(unop, identity)
 _attrgetter = lambda name: lambda x, **kwargs: getattr(x, name)

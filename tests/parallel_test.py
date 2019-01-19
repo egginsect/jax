@@ -63,6 +63,11 @@ class PapplyTest(jtu.JaxTestCase):
     expected = onp.arange(3)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
+  def testMap(self):
+    ans, axis = papply(np.sin)(onp.arange(3.))
+    expected = onp.sin(onp.arange(3.))
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
 
 if __name__ == '__main__':
   absltest.main()
