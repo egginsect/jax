@@ -38,11 +38,11 @@ def identity(x): return x
 
 ### spmd
 
-
 # The spmd code looks like the vmap code in batching.py, and even uses the same
-# set of rules for the most part, with the differences being that (1)
-# process_primitive handles special hidden-axis-reducer primitives, and (2) the
-# mapped axis is associated with a name.
+# set of rules, with the differences being that (1) process_primitive handles
+# special hidden-axis-reducer primitives, and (2) the mapped axis is associated
+# with a name (which is carried through the trace).
+
 
 def spmd(fun, name, in_vals, in_axes, out_axis_target):
   sizes = reduce(set.union, map(batching.dimsize, in_axes, in_vals))
@@ -125,17 +125,17 @@ class SpmdTrace(Trace):
       return primitive.bind(*vals_in, **params)
     else:
       # act just like vmap except when we hit a collective reduction
-      if primitive in spmd_collectives:
+      if primitive in spmd_primitive_rules:
         tracer, = tracers
         val, = vals_in
         axis, = axes_in
-        name = params['name']
+        name = params['axis_name']
 
         assert axis is not None
         if tracer.name == name:
-          return spmd_collectives[primitive](val, axis)
+          return spmd_primitive_rules[primitive](val, axis)
         else:
-          return primitive.bind(tracer, name=name)
+          return primitive.bind(val, axis_name=name)
       else:
         rule = batching.get_primitive_batcher(primitive)
         val_out, axis_out = rule(vals_in, axes_in, **params)
@@ -143,14 +143,15 @@ class SpmdTrace(Trace):
         return SpmdTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
-    names, vals, axes = unzpi3((t.name, t.val, t.axis) for t in tracers)
+    # TODO do something special for xla_call if it's abstracted over 'name'
+    names, vals, axes = unzip3((t.name, t.val, t.axis) for t in tracers)
     if all(axis is None for axis in axes):
       return call_primitive.bind(f, *vals, **params)
     else:
       name = next(name for name in names if name is not None)
       f, axis_out = spmd_subtrace(f, self.master, name, axes)
       val_out = call_primitive.bind(f, *vals, **params)
-      return SpmdTracer(self, self.name, val_out, dim_out())
+      return SpmdTracer(self, self.name, val_out, axis_out())
 
   def post_process_call(self, _, out_tracer):
     raise NotImplementedError  # TODO(mattjj,dougalm)
@@ -161,19 +162,31 @@ class SpmdTrace(Trace):
     return SpmdTracer(self, self.name, vals, axis)
 
 
-spmd_collectives = {}
+def unbound_name_error(x, axis_name):
+  raise NameError("axis name '{}' is unbound".format(axis_name))
 
-def collective_sum(x, axis_name):
-  return collective_sum_p.bind(x, name=axis_name)
+def SpmdPrimitive(name):
+  prim = Primitive(name)
+  prim.def_impl(unbound_name_error)
+  return prim
 
-def collective_sum_spmd_rule(x, axis):
-  if xb.get_replica_count() > 1:
-    return cross_replica_sum(x.sum(axis))
-  else:
-    return x.sum(axis)
 
-collective_sum_p = Primitive('collective_sum')
-spmd_collectives[collective_sum_p] = collective_sum_spmd_rule
+spmd_primitive_rules = {}
+
+
+def spmd_sum(x, axis_name):
+  return spmd_sum_p.bind(x, axis_name=axis_name)
+
+spmd_sum_p = SpmdPrimitive('spmd_sum')
+spmd_primitive_rules[spmd_sum_p] = lambda val, axis: val.sum(axis)
+
+
+# def cross_replica_sum(x):
+#   return cross_replica_sum_p.bind(x)
+
+# cross_replica_sum_p = Primitive('cross_replica_sum')
+# cross_replica_sum_p.def_abstract_eval(lambda x: x)
+# xla.translations[cross_replica_sum_p] = lambda c, x: c.CrossReplicaSum(x)
 
 
 ### sharded device values

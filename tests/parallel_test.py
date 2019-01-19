@@ -24,7 +24,7 @@ import jax.numpy as np
 from jax import test_util as jtu
 from jax.api import spmd
 from jax.api import papply
-from jax.interpreters.parallel import collective_sum
+from jax.interpreters.parallel import spmd_sum
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -39,7 +39,7 @@ class SpmdTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testReduceSum(self):
-    f = lambda x: collective_sum(x, 'i')
+    f = lambda x: spmd_sum(x, 'i')
     ans = spmd(f, axis_name='i')(onp.ones(4))
     expected = 4 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
@@ -47,7 +47,7 @@ class SpmdTest(jtu.JaxTestCase):
   def testLogSoftmax(self):
 
     def f(x):
-      return x - np.log(collective_sum(np.exp(x), 'i'))
+      return x - np.log(spmd_sum(np.exp(x), 'i'))
 
     x = onp.log(onp.arange(10., dtype=onp.float32))
 
