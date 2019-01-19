@@ -173,19 +173,20 @@ def psum(x, axis_name):
   return psum_p.bind(x, axis_name=axis_name)
 
 psum_p = PmapPrimitive('psum')
+psum_p.def_abstract_eval(lambda val, axis_name: val)
 pmap_primitive_rules[psum_p] = lambda val, axis: val.sum(axis)
 
 
 ### papply
 
+
 newvar = pe.gensym('_axis')
 
-def papply(fun, in_vals, in_axes):
+def papply(fun, name, in_vals, in_axes):
   sizes = reduce(set.union, map(batching.dimsize, in_axes, in_vals))
   if not sizes:
     return fun.call_wrapped(*in_vals)
   elif len(sizes) == 1:
-    name = newvar()
     size = sizes.pop()
     if size % xb.get_replica_count():
       msg = ("papply requires mapped axis to be divisible by num_replicas, "
@@ -193,7 +194,7 @@ def papply(fun, in_vals, in_axes):
       raise TypeError(msg.format(size, xb.get_replica_count()))
 
     out_val = papply_transform(fun).call_wrapped(name, in_vals, in_axes)
-    return out_val, name
+    return out_val
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
 
@@ -245,7 +246,7 @@ class PapplyTrace(Trace):
     else:
       name = next(n for n in names if n is not None)
       rule = papply_primitive_rules[primitive]
-      val, axis = rule(name, vals, axes)
+      val, axis = rule(name, vals, axes, **params)
       return PapplyTracer(self, name, val, axis)
 
   def process_call(self, call_primitive, f, tracers, params):
@@ -272,6 +273,23 @@ def vectorized_papply(prim, name, vals, axes, **params):
   return prim.bind(*vals, **params), axes[0]
 
 
+def defreducer(prim, collective_prim):
+  papply_primitive_rules[prim] = partial(reducer_papply, prim, collective_prim)
+
+def reducer_papply(prim, cprim, name, vals, papply_axes, input_shape, axes):
+  operand, = vals
+  papply_axis, = papply_axes
+
+  other_axes = [i for i in axes if i != papply_axis]
+  partial_result = prim.bind(operand, axes=other_axes, input_shape=input_shape)
+  if papply_axis in axes:
+    return cprim.bind(partial_result, axis_name=name), None
+  else:
+    new_papply_axis = papply_axis - onp.sum(onp.less(other_axes, papply_axis))
+    return partial_result, new_papply_axis
+
+
+# TODO below here is scratch
 
 # def parallel_xla_call_impl(fun, *args, **kwargs):
 #   in_axes = kwargs.pop('in_axes')

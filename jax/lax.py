@@ -2153,10 +2153,23 @@ def reduce_sum_transpose_rule(cotangent, input_shape, axes):
   assert result.shape == input_shape
   return [result]
 
+# def reduce_sum_papply_rule(name, vals, papply_axes, input_shape, axes):
+#   operand, = vals
+#   papply_axis, = papply_axes
+
+#   if papply_axis in axes:
+#     other_axes = [i for i in axes if i != papply_axis]
+#     partial_result = _reduce_sum(operand, other_axes)
+#     return parallel.psum(partial_result, name), None
+#   else:
+#     return batching.reducer_batcher(reduce_sum_p, vals, papply_axes, axes,
+#                                     input_shape=input_shape)
+
 reduce_sum_p = standard_primitive(reduce_sum_shape_rule, _input_dtype,
                                   'reduce_sum', reduce_sum_translation_rule)
 ad.deflinear(reduce_sum_p, reduce_sum_transpose_rule)
 batching.defreducer(reduce_sum_p)
+parallel.defreducer(reduce_sum_p, parallel.psum_p)
 
 
 def reduce_chooser_shape_rule(operand, axes):

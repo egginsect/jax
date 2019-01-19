@@ -272,16 +272,17 @@ def pmap(fun, axis_name, in_axes=0, out_axes=0):
 
 def papply(fun, in_axes=0):
   """Apply a function using parallel computation by sharding inputs."""
+  axis_name = parallel.newvar()
 
   def papply_fun(*args, **kwargs):
     f = lu.wrap_init(fun, kwargs)
     in_axes_ = (in_axes,) * len(args) if type(in_axes) is int else in_axes
     args_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, args))
     jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
-    out_flat = parallel.papply(jaxtree_fun, args_flat, in_axes_)
+    out_flat = parallel.papply(jaxtree_fun, axis_name, args_flat, in_axes_)
     return build_tree(out_tree(), out_flat)
 
-  return papply_fun
+  return papply_fun, axis_name
 
 
 def jvp(fun, primals, tangents):

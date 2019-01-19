@@ -59,13 +59,21 @@ class PmapTest(jtu.JaxTestCase):
 class PapplyTest(jtu.JaxTestCase):
 
   def testIdentity(self):
-    ans, axis = papply(lambda x: x)(onp.arange(3))
+    pfun, axis_name = papply(lambda x: x)
+    ans = pfun(onp.arange(3))
     expected = onp.arange(3)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testMap(self):
-    ans, axis = papply(np.sin)(onp.arange(3.))
+    pfun, axis_name = papply(np.sin)
+    ans = pfun(onp.arange(3.))
     expected = onp.sin(onp.arange(3.))
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+  def testSum(self):
+    pfun, axis_name = papply(np.sum)
+    ans = pmap(pfun, axis_name=axis_name)(onp.arange(3.))
+    expected = onp.sum(onp.arange(3.))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
 
