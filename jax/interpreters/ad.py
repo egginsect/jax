@@ -18,7 +18,6 @@ from __future__ import print_function
 
 from . import partial_eval as pe
 from . import xla
-from . import parallel
 from .. import core as core
 from ..core import JaxTuple, Trace, Tracer, new_master, get_aval, pack, call_p, Primitive
 from ..ad_util import (add_jaxvals, add_jaxvals_p, zeros_like_jaxval,
@@ -394,7 +393,6 @@ def call_transpose(primitive, params, jaxpr, consts, freevar_vals, args, ct):
 primitive_transposes[core.call_p] = partial(call_transpose, call_p)
 primitive_transposes[pe.compiled_call_p] = partial(call_transpose, pe.compiled_call_p)
 primitive_transposes[xla.xla_call_p] = partial(call_transpose, xla.xla_call_p)
-primitive_transposes[parallel.parallel_xla_call_p] = partial(call_transpose, parallel.parallel_xla_call_p)
 
 
 tree_to_jaxtuples = partial(process_pytree, pack)

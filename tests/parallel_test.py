@@ -24,7 +24,7 @@ import jax.numpy as np
 from jax import test_util as jtu
 from jax.api import pmap
 from jax.api import papply
-from jax.interpreters.parallel import pmap_sum
+from jax.interpreters.parallel import psum
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -39,7 +39,7 @@ class PmapTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testReduceSum(self):
-    f = lambda x: pmap_sum(x, 'i')
+    f = lambda x: psum(x, 'i')
     ans = pmap(f, axis_name='i')(onp.ones(4))
     expected = 4 * onp.ones(4)
     self.assertAllClose(ans, expected, check_dtypes=False)
@@ -47,21 +47,21 @@ class PmapTest(jtu.JaxTestCase):
   def testLogSoftmax(self):
 
     def f(x):
-      return x - np.log(pmap_sum(np.exp(x), 'i'))
+      return x - np.log(psum(np.exp(x), 'i'))
 
-    x = onp.log(onp.arange(10., dtype=onp.float32))
+    x = onp.log(onp.arange(1., 10., dtype=onp.float32))
 
     ans = pmap(f, axis_name='i')(x)
     expected = x - onp.log(onp.sum(onp.exp(x)))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
 
-# class PapplyTest(jtu.JaxTestCase):
+class PapplyTest(jtu.JaxTestCase):
 
-#   def testIdentity(self):
-#     ans = papply(lambda x: x)(onp.arange(3))
-#     expected = onp.arange(3)
-#     self.assertAllClose(ans, expected, check_dtypes=False)
+  def testIdentity(self):
+    ans, axis = papply(lambda x: x)(onp.arange(3))
+    expected = onp.arange(3)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
 
 if __name__ == '__main__':

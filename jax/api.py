@@ -278,8 +278,7 @@ def papply(fun, in_axes=0):
     in_axes_ = (in_axes,) * len(args) if type(in_axes) is int else in_axes
     args_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, args))
     jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
-    out_flat = parallel.parallel_xla_call(jaxtree_fun, *args_flat,
-                                          in_axes=in_axes_)
+    out_flat = parallel.papply(jaxtree_fun, args_flat, in_axes_)
     return build_tree(out_tree(), out_flat)
 
   return papply_fun
