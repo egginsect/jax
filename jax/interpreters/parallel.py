@@ -122,9 +122,11 @@ class PmapTrace(Trace):
 
         assert axis is not None
         if tracer.name == name:
-          return pmap_primitive_rules[primitive](val, axis)
+          other_params = {k: params[k] for k in params if k != 'axis_name'}
+          val_out, axis_out = pmap_primitive_rules[primitive](val, axis, **other_params)
+          return PmapTracer(self, name, val_out, axis_out)
         else:
-          return primitive.bind(val, axis_name=name)
+          return primitive.bind(val, **params)
       else:
         rule = batching.get_primitive_batcher(primitive)
         val_out, axis_out = rule(vals_in, axes_in, **params)
@@ -151,13 +153,13 @@ class PmapTrace(Trace):
     return PmapTracer(self, self.name, vals, axis)
 
 
-def unbound_name_error(x, axis_name):
+def unbound_name_error(x, axis_name, **kwargs):
   raise NameError("axis name '{}' is unbound".format(axis_name))
 
 def PmapPrimitive(name):
   prim = Primitive(name)
   prim.def_impl(unbound_name_error)
-  prim.def_abstract_eval(lambda x, axis_name: x)
+  prim.def_abstract_eval(lambda x, **kwargs: x)
   return prim
 
 
@@ -166,16 +168,22 @@ pmap_primitive_rules = {}
 
 def psum(x, axis_name):
   return psum_p.bind(x, axis_name=axis_name)
-
 psum_p = PmapPrimitive('psum')
-pmap_primitive_rules[psum_p] = lambda val, axis: val.sum(axis)
+pmap_primitive_rules[psum_p] = lambda val, axis: (val.sum(axis), None)
 
 
-def pgather(x, axis_name):
-  return pgather_p.bind(x, axis_name=axis_name)
+def gather(x, axis_name):
+  return gather_p.bind(x, axis_name=axis_name)
+gather_p = PmapPrimitive('gather')
+pmap_primitive_rules[gather_p] = lambda val, axis: (val, None)
 
-pgather_p = PmapPrimitive('pgather')
-pmap_primitive_rules[pgather_p] = lambda val, _: val
+
+def rescatter(x, new_axis, axis_name):
+  return pscatter_p.bind(x, new_axis=new_axis, axis_name=axis_name)
+def rescatter_pmap_rule(val, axis, new_axis):
+  return batching.moveaxis(None, new_axis, axis, val), new_axis
+pscatter_p = PmapPrimitive('pscatter')
+pmap_primitive_rules[pscatter_p] = rescatter_pmap_rule
 
 
 ### papply
@@ -234,8 +242,8 @@ class PapplyTrace(Trace):
     else:
       name = next(n for n in names if n is not None)
       rule = papply_primitive_rules[primitive]
-      val, axis = rule(name, vals, axes, **params)
-      return PapplyTracer(self, name, val, axis)
+      val_out, axis_out = rule(name, vals, axes, **params)
+      return PapplyTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
     raise NotImplementedError  # TODO(mattjj)
@@ -296,7 +304,8 @@ def broadcasting_papply(prim, name, vals, axes, **params):
   elif xdim == ydim:
     return prim.bind(x, y, **params), xdim
   else:
-    x = pgather(x, name)
+    # TODO rescatter based on sizes
+    x = rescatter(x, ydim, name)
     return prim.bind(x, y, **params), ydim
 
 

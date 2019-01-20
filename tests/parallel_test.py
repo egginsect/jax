@@ -96,6 +96,25 @@ class PapplyTest(jtu.JaxTestCase):
     expected = fun(onp.arange(1., 5.))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
+  def testAdd(self):
+    x = onp.array([[1, 2], [3, 4]])
+    expected = x + x
+
+    pfun, axis_name = papply(np.add)
+    ans = pmap(pfun, axis_name)(x, x)
+    self.assertAllClose(ans, expected, check_dtypes=True)
+
+    pfun, axis_name = papply(np.add, (0, 1))
+    ans = pmap(pfun, axis_name)(x, x)
+    self.assertAllClose(ans, expected, check_dtypes=True)
+
+    # TODO needs reshape papply rule
+    # pfun, axis_name = papply(lambda y: y + x)
+    # ans = pmap(pfun, axis_name)(x)
+    # self.assertAllClose(ans, expected, check_dtypes=True)
+    # ans = pmap(pfun, axis_name)(x)
+    # self.assertAllClose(ans, expected, check_dtypes=True)
+
 
 if __name__ == '__main__':
   absltest.main()
