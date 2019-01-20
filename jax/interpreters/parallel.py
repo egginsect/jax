@@ -44,14 +44,8 @@ def pmap(fun, name, in_vals, in_axes, out_axis_target):
   if not sizes:
     return fun.call_wrapped(*in_vals)
   elif len(sizes) == 1:
-    size = sizes.pop()
-    if size % xb.get_replica_count():
-      msg = ("pmap requires mapped axis to be divisible by num_replicas, "
-             "got axis size {} for {} replicas.")
-      raise TypeError(msg.format(size, xb.get_replica_count()))
-
     out_val, out_axis = pmap_transform(fun).call_wrapped(name, in_vals, in_axes)
-    return batching.moveaxis(size, out_axis_target, out_axis, out_val)
+    return batching.moveaxis(sizes.pop(), out_axis_target, out_axis, out_val)
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
 
@@ -183,20 +177,7 @@ pmap_primitive_rules[psum_p] = lambda val, axis: val.sum(axis)
 newvar = pe.gensym('_axis')
 
 def papply(fun, name, in_vals, in_axes):
-  sizes = reduce(set.union, map(batching.dimsize, in_axes, in_vals))
-  if not sizes:
-    return fun.call_wrapped(*in_vals)
-  elif len(sizes) == 1:
-    size = sizes.pop()
-    if size % xb.get_replica_count():
-      msg = ("papply requires mapped axis to be divisible by num_replicas, "
-             "got axis size {} for {} replicas.")
-      raise TypeError(msg.format(size, xb.get_replica_count()))
-
-    out_val = papply_transform(fun).call_wrapped(name, in_vals, in_axes)
-    return out_val
-  else:
-    raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
+  return papply_transform(fun).call_wrapped(name, in_vals, in_axes)
 
 @lu.transformation
 def papply_transform(name, args, axes):
@@ -281,12 +262,16 @@ def reducer_papply(prim, cprim, name, vals, papply_axes, input_shape, axes):
   papply_axis, = papply_axes
 
   other_axes = [i for i in axes if i != papply_axis]
-  partial_result = prim.bind(operand, axes=other_axes, input_shape=input_shape)
+  if other_axes:
+    result = prim.bind(operand, axes=other_axes, input_shape=input_shape)
+  else:
+    result = operand
+
   if papply_axis in axes:
-    return cprim.bind(partial_result, axis_name=name), None
+    return cprim.bind(result, axis_name=name), None
   else:
     new_papply_axis = papply_axis - onp.sum(onp.less(other_axes, papply_axis))
-    return partial_result, new_papply_axis
+    return result, new_papply_axis
 
 
 # TODO below here is scratch
