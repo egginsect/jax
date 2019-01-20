@@ -108,7 +108,6 @@ class PapplyTest(jtu.JaxTestCase):
     ans = pmap(pfun, axis_name)(x, x)
     self.assertAllClose(ans, expected, check_dtypes=True)
 
-    # TODO needs reshape papply rule (?)
     # pfun, axis_name = papply(lambda y: y + x)
     # ans = pmap(pfun, axis_name)(x)
     # self.assertAllClose(ans, expected, check_dtypes=True)

@@ -113,24 +113,18 @@ class PmapTrace(Trace):
     if all(axis is None for axis in axes_in):
       return primitive.bind(*vals_in, **params)
     else:
-      # act just like vmap except when we hit a collective reduction
+      name = next(name for name in names_in if name is not None)
       if primitive in pmap_primitive_rules:
-        tracer, = tracers
-        val, = vals_in
-        axis, = axes_in
-        name = params['axis_name']
-
-        assert axis is not None
-        if tracer.name == name:
-          other_params = {k: params[k] for k in params if k != 'axis_name'}
-          val_out, axis_out = pmap_primitive_rules[primitive](val, axis, **other_params)
+        if name == params['axis_name']:
+          rule = pmap_primitive_rules[primitive]
+          params = {k: params[k] for k in params if k != 'axis_name'}
+          val_out, axis_out = rule(vals_in, axes_in, **params)
           return PmapTracer(self, name, val_out, axis_out)
         else:
           return primitive.bind(val, **params)
       else:
         rule = batching.get_primitive_batcher(primitive)
         val_out, axis_out = rule(vals_in, axes_in, **params)
-        name = next(name for name in names_in if name is not None)
         return PmapTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
@@ -153,13 +147,14 @@ class PmapTrace(Trace):
     return PmapTracer(self, self.name, vals, axis)
 
 
-def unbound_name_error(x, axis_name, **kwargs):
+def unbound_name_error(*args, **kwargs):
+  axis_name = kwargs['axis_name']
   raise NameError("axis name '{}' is unbound".format(axis_name))
 
 def PmapPrimitive(name):
   prim = Primitive(name)
   prim.def_impl(unbound_name_error)
-  prim.def_abstract_eval(lambda x, **kwargs: x)
+  prim.def_abstract_eval(lambda x, *args, **kwargs: x)  # default
   return prim
 
 
@@ -168,22 +163,53 @@ pmap_primitive_rules = {}
 
 def psum(x, axis_name):
   return psum_p.bind(x, axis_name=axis_name)
+
+def psum_pmap_rule(vals, axes):
+  val, = vals
+  axis, = axes
+  return val.sum(axis), None
+
 psum_p = PmapPrimitive('psum')
-pmap_primitive_rules[psum_p] = lambda val, axis: (val.sum(axis), None)
+pmap_primitive_rules[psum_p] = psum_pmap_rule
 
 
 def gather(x, axis_name):
   return gather_p.bind(x, axis_name=axis_name)
+
+def gather_pmap_rule(vals, axes):
+  val, = vals
+  return val, None
+
 gather_p = PmapPrimitive('gather')
-pmap_primitive_rules[gather_p] = lambda val, axis: (val, None)
+pmap_primitive_rules[gather_p] = gather_pmap_rule
 
 
 def rescatter(x, new_axis, axis_name):
   return pscatter_p.bind(x, new_axis=new_axis, axis_name=axis_name)
-def rescatter_pmap_rule(val, axis, new_axis):
+
+def rescatter_pmap_rule(vals, axes, new_axis):
+  val, = vals
+  axis, = axes
   return batching.moveaxis(None, new_axis, axis, val), new_axis
+
 pscatter_p = PmapPrimitive('pscatter')
 pmap_primitive_rules[pscatter_p] = rescatter_pmap_rule
+
+
+def scatter_like(source, target, axis_name):
+  # TODO
+  if source.shape != target.shape:
+    raise TypeError("scatter_like source and target shapes must match.")
+  return scatter_like_p.bind(source, target, axis_name=axis_name)
+
+def scatter_like_pmap_rule(vals, axes):
+  source, target = vals
+  source_axis, target_axis = axes
+  assert source_axis is None
+  return source, target_axis
+
+scatter_like_p = PmapPrimitive('scatter_like_p')
+pmap_primitive_rules[scatter_like_p] = rescatter_pmap_rule
 
 
 ### papply
@@ -296,7 +322,6 @@ def broadcasting_papply(prim, name, vals, axes, **params):
   x, y = vals
   xdim, ydim = axes
 
-  # TODO handle scalar broadcasting, probably
   if xdim is None:
     return prim.bind(x, y, **params), ydim
   elif ydim is None:

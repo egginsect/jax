@@ -1573,10 +1573,24 @@ def reshape_batch_rule(batched_args, batch_dims, new_sizes, dimensions, **unused
     dimensions = (0,) + tuple(onp.add(1, dimensions))
   return reshape(operand, operand.shape[:1] + new_sizes, dimensions), 0
 
+def reshape_papply_rule(name, vals, axes, new_sizes, dimensions, old_sizes):
+  operand, = vals
+  axis, = axes
+
+  if dimensions is None:
+    # if there is an i such that prod(new_sizes[:i]) == prod(old_sizes[:axis])
+    # and new_sizes[i] == old_sizes[axis], then we can maintain sharding.
+    # otherwise, it's ambiguous, and we could either gather or just make up a
+    # way to rescatter.
+    raise NotImplementedError  # TODO
+  else:
+    raise NotImplementedError  # TODO(mattjj): handle reshape w/ dimensions
+
 reshape_p = standard_primitive(reshape_shape_rule, reshape_dtype_rule,
                                'reshape', reshape_translation_rule)
 ad.deflinear(reshape_p, reshape_transpose_rule)
 batching.primitive_batchers[reshape_p] = reshape_batch_rule
+parallel.papply_primitive_rules[reshape_p] = reshape_papply_rule
 
 
 def rev_shape_rule(operand, dimensions):
