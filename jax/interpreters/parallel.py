@@ -212,7 +212,7 @@ class PapplyTracer(Tracer):
 
 class PapplyTrace(Trace):
   def pure(self, val):
-    return PapplyTrace(self, None, val, None)
+    return PapplyTracer(self, None, val, None)
 
   def lift(self, val):
     return PapplyTracer(self, None, val, None)
@@ -267,7 +267,7 @@ def reducer_papply(prim, cprim, name, vals, papply_axes, input_shape, axes):
   else:
     result = operand
 
-  if papply_axis in axes:
+  if not axes or papply_axis in axes:
     return cprim.bind(result, axis_name=name), None
   else:
     new_papply_axis = papply_axis - onp.sum(onp.less(other_axes, papply_axis))
