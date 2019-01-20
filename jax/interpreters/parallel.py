@@ -157,6 +157,7 @@ def unbound_name_error(x, axis_name):
 def PmapPrimitive(name):
   prim = Primitive(name)
   prim.def_impl(unbound_name_error)
+  prim.def_abstract_eval(lambda x, axis_name: x)
   return prim
 
 
@@ -167,8 +168,14 @@ def psum(x, axis_name):
   return psum_p.bind(x, axis_name=axis_name)
 
 psum_p = PmapPrimitive('psum')
-psum_p.def_abstract_eval(lambda val, axis_name: val)
 pmap_primitive_rules[psum_p] = lambda val, axis: val.sum(axis)
+
+
+def pgather(x, axis_name):
+  return pgather_p.bind(x, axis_name=axis_name)
+
+pgather_p = PmapPrimitive('pgather')
+pmap_primitive_rules[pgather_p] = lambda val, _: val
 
 
 ### papply
@@ -272,6 +279,26 @@ def reducer_papply(prim, cprim, name, vals, papply_axes, input_shape, axes):
   else:
     new_papply_axis = papply_axis - onp.sum(onp.less(other_axes, papply_axis))
     return result, new_papply_axis
+
+
+def defbroadcasting(prim):
+  papply_primitive_rules[prim] = partial(broadcasting_papply, prim)
+
+def broadcasting_papply(prim, name, vals, axes, **params):
+  x, y = vals
+  xdim, ydim = axes
+
+  # TODO handle scalar broadcasting, probably
+  if xdim is None:
+    return prim.bind(x, y, **params), ydim
+  elif ydim is None:
+    return prim.bind(x, y, **params), xdim
+  elif xdim == ydim:
+    return prim.bind(x, y, **params), xdim
+  else:
+    x = pgather(x, name)
+    return prim.bind(x, y, **params), ydim
+
 
 
 # TODO below here is scratch

@@ -799,6 +799,7 @@ def binop(result_dtype, accepted_dtypes, name):
   shape_rule = partial(broadcasting_shape_rule, name)
   prim = standard_primitive(shape_rule, dtype_rule, name)
   batching.defbroadcasting(prim)
+  parallel.defbroadcasting(prim)
   return prim
 standard_binop = partial(binop, _input_dtype)
 

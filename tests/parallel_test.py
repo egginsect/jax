@@ -94,7 +94,7 @@ class PapplyTest(jtu.JaxTestCase):
 
     ans = pmap(pfun, axis_name)(onp.arange(1., 5.))
     expected = fun(onp.arange(1., 5.))
-    self.assertAllCLose(ans, expected, check_dtypes=False)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
 
 if __name__ == '__main__':
