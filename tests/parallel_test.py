@@ -70,18 +70,31 @@ class PapplyTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testSum(self):
-    def fun(x):
-      return np.sum(x)
-
-    pfun, axis_name = papply(fun)
+    pfun, axis_name = papply(np.sum)
 
     jaxpr = make_jaxpr(pfun)(onp.zeros(5))
     expected_jaxpr = make_jaxpr(lambda x: psum(x, axis_name))(onp.zeros(5))
     assert repr(jaxpr) == repr(expected_jaxpr)
 
     ans = pmap(pfun, axis_name)(onp.arange(3.))
-    expected = pmap(lambda x: psum(x, axis_name), axis_name)(onp.arange(3.))
+    expected = onp.sum(onp.arange(3.))
     self.assertAllClose(ans, expected, check_dtypes=False)
+
+  def testLogSoftmax(self):
+
+    def fun(x):
+      return x - np.log(np.sum(np.exp(x)))
+
+    pfun, axis_name = papply(fun)
+
+    jaxpr = make_jaxpr(pfun)(onp.zeros(5))
+    expected_jaxpr = make_jaxpr(lambda x: x - np.log(psum(np.exp(x), axis_name))
+                                )(onp.zeros(5))
+    assert repr(jaxpr) == repr(expected_jaxpr)
+
+    ans = pmap(pfun, axis_name)(onp.arange(1., 5.))
+    expected = fun(onp.arange(1., 5.))
+    self.assertAllCLose(ans, expected, check_dtypes=False)
 
 
 if __name__ == '__main__':
