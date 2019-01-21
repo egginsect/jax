@@ -22,8 +22,9 @@ from absl.testing import parameterized
 
 import jax.numpy as np
 from jax import test_util as jtu
+from jax import lax
 from jax.api import pmap, papply, make_jaxpr
-from jax.interpreters.parallel import psum
+from jax.interpreters.parallel import psum, scatter_like
 
 from jax.config import config
 config.parse_flags_with_absl()
@@ -97,22 +98,32 @@ class PapplyTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testAdd(self):
-    x = onp.array([[1, 2], [3, 4]])
+    x = onp.array([[1, 2, 3], [4, 5, 6]])
     expected = x + x
 
     pfun, axis_name = papply(np.add)
     ans = pmap(pfun, axis_name)(x, x)
     self.assertAllClose(ans, expected, check_dtypes=True)
 
-    pfun, axis_name = papply(np.add, (0, 1))
-    ans = pmap(pfun, axis_name)(x, x)
-    self.assertAllClose(ans, expected, check_dtypes=True)
+#   def testAddDifferentSharding(self):
+#     x = onp.array([[1, 2, 3], [4, 5, 6]])
+#     expected = x + x
 
-    # pfun, axis_name = papply(lambda y: y + x)
-    # ans = pmap(pfun, axis_name)(x)
-    # self.assertAllClose(ans, expected, check_dtypes=True)
-    # ans = pmap(pfun, axis_name)(x)
-    # self.assertAllClose(ans, expected, check_dtypes=True)
+#     pfun, axis_name = papply(np.add, (0, 1))
+#     ans = pmap(pfun, axis_name)(x, x)
+#     self.assertAllClose(ans, expected, check_dtypes=True)
+
+#   def testScatterLike(self):
+#     def fun(y):
+#       x_scattered = scatter_like(x, y)
+#       return lax.add(x_scattered, y)  # TODO replace with x + y
+
+#     x = onp.array([[1, 2], [3, 4]])
+#     expected = x + x
+
+#     pfun, axis_name = papply(fun)
+#     ans = pmap(pfun, axis_name)(x)
+#     self.assertAllClose(ans, expected, check_dtypes=True)
 
   def testAddBroadcasting(self):
 

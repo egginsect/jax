@@ -147,13 +147,14 @@ class PmapTrace(Trace):
     return PmapTracer(self, self.name, vals, axis)
 
 
-def unbound_name_error(*args, **kwargs):
+def unbound_name_error(primitive_name, *args, **kwargs):
   axis_name = kwargs['axis_name']
-  raise NameError("axis name '{}' is unbound".format(axis_name))
+  msg = "axis name '{}' is unbound for primitive {}."
+  raise NameError(msg.format(axis_name, primitive_name))
 
 def PmapPrimitive(name):
   prim = Primitive(name)
-  prim.def_impl(unbound_name_error)
+  prim.def_impl(partial(unbound_name_error, name))
   prim.def_abstract_eval(lambda x, *args, **kwargs: x)  # default
   return prim
 
@@ -185,31 +186,29 @@ pmap_primitive_rules[gather_p] = gather_pmap_rule
 
 
 def rescatter(x, new_axis, axis_name):
-  return pscatter_p.bind(x, new_axis=new_axis, axis_name=axis_name)
+  return rescatter_p.bind(x, new_axis=new_axis, axis_name=axis_name)
 
 def rescatter_pmap_rule(vals, axes, new_axis):
   val, = vals
   axis, = axes
+  raise NotImplementedError  # TODO why the transpose, instead of identity?
   return batching.moveaxis(None, new_axis, axis, val), new_axis
 
-pscatter_p = PmapPrimitive('pscatter')
-pmap_primitive_rules[pscatter_p] = rescatter_pmap_rule
+rescatter_p = PmapPrimitive('rescatter')
+pmap_primitive_rules[rescatter_p] = rescatter_pmap_rule
 
 
-def scatter_like(source, target, axis_name):
-  # TODO
-  if source.shape != target.shape:
-    raise TypeError("scatter_like source and target shapes must match.")
-  return scatter_like_p.bind(source, target, axis_name=axis_name)
+def _scatter(source, dummy, target_axis, axis_name):
+  scatter_p.bind(source, dummy, target_axis=target_axis, axis_name=axis_name)
 
-def scatter_like_pmap_rule(vals, axes):
-  source, target = vals
-  source_axis, target_axis = axes
+def scatter_pmap_rule(vals, axes, new_axis):
+  source, _ = vals
+  source_axis, _ = axes
   assert source_axis is None
-  return source, target_axis
+  return source, new_axis
 
-scatter_like_p = PmapPrimitive('scatter_like_p')
-pmap_primitive_rules[scatter_like_p] = rescatter_pmap_rule
+scatter_p = PmapPrimitive('scatter')
+pmap_primitive_rules[scatter_p] = scatter_pmap_rule
 
 
 ### papply
@@ -287,6 +286,20 @@ class PapplyTrace(Trace):
 papply_primitive_rules = {}
 
 
+def scatter_like(source, target):
+  return scatter_like_p.bind(source, target)
+
+def scatter_like_papply_rule(name, vals, axes):
+  source, target = vals
+  source_axis, target_axis = axes
+  assert source_axis is None
+  return _scatter(target, source, target_axis, name)
+
+scatter_like_p = Primitive('scatter_like')
+scatter_like_p.def_abstract_eval(lambda source, target: source)
+papply_primitive_rules[scatter_like_p] = scatter_like_papply_rule
+
+
 def defvectorized(prim):
   papply_primitive_rules[prim] = partial(vectorized_papply, prim)
 
@@ -330,6 +343,7 @@ def broadcasting_papply(prim, name, vals, axes, **params):
     return prim.bind(x, y, **params), xdim
   else:
     # TODO rescatter based on sizes
+    raise NotImplementedError  # this isn't right, need to think about names
     x = rescatter(x, ydim, name)
     return prim.bind(x, y, **params), ydim
 
