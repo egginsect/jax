@@ -199,13 +199,13 @@ pmap_primitive_rules[rescatter_p] = rescatter_pmap_rule
 
 
 def _scatter(source, dummy, target_axis, axis_name):
-  scatter_p.bind(source, dummy, target_axis=target_axis, axis_name=axis_name)
+  return scatter_p.bind(source, dummy, target_axis=target_axis, axis_name=axis_name)
 
-def scatter_pmap_rule(vals, axes, new_axis):
+def scatter_pmap_rule(vals, axes, target_axis):
   source, _ = vals
   source_axis, _ = axes
   assert source_axis is None
-  return source, new_axis
+  return source, target_axis
 
 scatter_p = PmapPrimitive('scatter')
 pmap_primitive_rules[scatter_p] = scatter_pmap_rule
@@ -293,7 +293,7 @@ def scatter_like_papply_rule(name, vals, axes):
   source, target = vals
   source_axis, target_axis = axes
   assert source_axis is None
-  return _scatter(target, source, target_axis, name)
+  return _scatter(source, target, target_axis, name)
 
 scatter_like_p = Primitive('scatter_like')
 scatter_like_p.def_abstract_eval(lambda source, target: source)
