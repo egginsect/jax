@@ -128,15 +128,18 @@ class PmapTrace(Trace):
         return PmapTracer(self, name, val_out, axis_out)
 
   def process_call(self, call_primitive, f, tracers, params):
+    # TODO do what vmap does
     names, vals, axes = unzip3((t.name, t.val, t.axis) for t in tracers)
     if all(axis is None for axis in axes):
       return call_primitive.bind(f, *vals, **params)
     else:
       name = next(name for name in names if name is not None)  # all same
       f, axis_out = pmap_subtrace(f, self.master, name, axes)
+
       bindings = params.pop('axis_name_bindings', (None,) * len(vals))
       bindings = map(partial(update_binding, name), vals, bindings, axes)
       params = dict(params, axis_name_bindings=bindings)
+
       val_out = call_primitive.bind(f, *vals, **params)
       return PmapTracer(self, self.name, val_out, axis_out())
 

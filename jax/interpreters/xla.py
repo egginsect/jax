@@ -403,20 +403,13 @@ def build_tree(xs, tree_spec):
     raise TypeError(type(tree_spec))
 
 
-def xla_call_impl(fun, *args, **params):
-  axis_name_bindings = params.pop('axis_name_bindings', None)
-  assert not params  # TODO add optional name-device bindings
-
+def xla_call_impl(fun, *args):
   flat_args, in_trees = unzip2(map(tree_flatten, args))
   flat_args = concatenate(flat_args)
   fun, out_tree = flatten_fun(fun, in_trees)
 
-  abstract_args = map(abstractify, flat_args)
-  if not axis_name_bindings:
-    compiled = xla_callable(fun, *abstract_args)
-  else:
-    compiled = xla_replicated_callable(fun, axis_name_bindings, *abstract_args)
-  flat_ans = compiled(*flat_args)
+  compiled_fun = xla_callable(fun, *map(abstractify, flat_args))
+  flat_ans = compiled_fun(*flat_args)
 
   if out_tree() is leaf:
     return flat_ans
@@ -452,148 +445,94 @@ xla_call_p.def_impl(xla_call_impl)
 translations[xla_call_p] = xla_call_translation_rule
 
 
-@linear_memoize
-def xla_replicated_callable(fun, axis_name_bindings, *abstract_args):
-  pvals = [pe.PartialVal((aval, core.unit)) for aval in abstract_args]
-  with core.new_master(pe.JaxprTrace, True) as master:
-    jaxpr, (pval, consts, env) = trace_to_subjaxpr(fun, master).call_wrapped(pvals)
-    assert not env  # no subtraces here
-    compiled, result_shape = compile_sharded_jaxpr(jaxpr, axis_name_bindings,
-                                                   consts, *abstract_args)
-    del master, consts, jaxpr, env
-  handle_result = result_handler(result_shape)  # TODO multi-replica result
-  return partial(execute_replicated, axis_name_bindings, compiled, pval, handle_result)
-
-def compile_sharded_jaxpr(jaxpr, axis_names_in, consts, *abstract_args):
-  arg_shapes = [xla_shape(shard_aval(aval, axis))
-                for aval, (_, axis) in zip(abstract_args, axis_names_in)]
-  built_c, axis_names_out = jaxpr_replicated_computation(
-      jaxpr, axis_names_in, consts, (), *arg_shapes)
-  sharded_result_shape = xla_shape_to_result_shape(built_c.GetReturnValueShape())
-  result_shape = unshard_result_shape(axis_names_out, sharded_result_shape)
-  return built_c.Compile(arg_shapes, xb.get_compile_options()), result_shape
-
-def jaxpr_replicated_computation(jaxpr, axis_names_in, const_vals,
-                                 freevar_shapes, *arg_shapes):
-  c = xb.make_computation_builder("sharded_jaxpr_computation")
-
-  def read(v):
-    return env[v]
-
-  def write(v, node):
-    assert node is not None
-    env[v] = node
-
-  def read_devicemap(v):
-    # TODO default for most things
-    return devicemap_env[v]
-
-  def write_devicemap(v, devicemap):
-    devicemap_env[v] = devicemap
-
-  env = {}
-  consts_env = dict(zip(jaxpr.constvars, const_vals))
-  write(core.unitvar, c.Tuple())
-  map(write, jaxpr.constvars, map(c.Constant, const_vals))
-  map(write, jaxpr.freevars, map(c.ParameterWithShape, freevar_shapes))
-  map(write, jaxpr.invars, map(c.ParameterWithShape, arg_shapes))
-  for eqn in jaxpr.eqns:
-    if eqn.bound_subjaxprs: raise NotImplementedError
-    in_nodes = map(read, eqn.invars)
-    if eqn.primitive in multi_replica_translations:
-      in_devicemaps = map(read_devicemap, eqn.invars)
-      rule = multi_replica_translations[eqn.primitive]
-      out, out_devicemap = rule(c, in_nodes, in_devicemaps, **eqn.params)
-      out_nodes = xla_destructure(c, out) if eqn.destructure else [out]
-      out_devicemaps = out_devicemap if eqn.destructure else [out_devicemap]
-      map(write_devicemap, eqn.outvars, out_devicemaps)
-    else:
-      out = translation_rule(eqn.primitive)(c, *in_nodes, **eqn.params)
-      out_nodes = xla_destructure(c, out) if eqn.destructure else [out]
-    map(write, eqn.outvars, out_nodes)
-  return c.Build(read(jaxpr.outvar)), read_devicemap(jaxpr.outvar)
-
-def shard_aval(axis, aval):
-  if isinstance(aval, ShapedArray):
-    assert aval.shape[axis] % xb.get_replica_count() == 0
-    shard_shape = tuple(s // xb.get_replica_count() if i == axis else s
-                        for i, s in enumerate(aval.shape))
-    return ShapedArray(shard_shape, aval.dtype)
-  else:
-    raise NotImplementedError  # TODO
-
-def unshard_result_shape(axis, result_shape):
-  if type(result_shape) is ResultArray:
-    shape, dtype, ndim, size = result_shape
-    shape = tuple(s * xb.get_replica_count() if i == axis else s
-                  for i, s in enumerate(shape))
-    return ResultArray((shape, dtype, ndim, size))
-  else:
-    raise NotImplementedError  # TODO
+# @linear_memoize
+# def xla_replicated_callable(fun, axis_name_bindings, *abstract_args):
+#   # TODO chunk
+#   # TODO lower to xla
+#   raise NotImplementedError
 
 
-def execute_replicated(compiled, in_axes, pval, handle_result, *args):
-  sharded_args = zip(*map(shard_arg, in_axes, args))
-  input_bufs = [device_put_sharded(sharded_arg)
-                for sharded_arg in sharded_args]
-  out_bufs = compiled.ExecutePerReplica(input_bufs)
-  return pe.merge_pvals(handle_result(out_bufs), pval)
+# def shard_aval(axis, aval):
+#   if isinstance(aval, ShapedArray):
+#     assert aval.shape[axis] % xb.get_replica_count() == 0
+#     shard_shape = tuple(s // xb.get_replica_count() if i == axis else s
+#                         for i, s in enumerate(aval.shape))
+#     return ShapedArray(shard_shape, aval.dtype)
+#   else:
+#     raise NotImplementedError  # TODO
 
-def shard_arg(axis, x):
-  t = type(x)
-  if t is ShardedDeviceArray:
-    return x
-  elif t is onp.ndarray:
-    num_replicas = xb.get_replica_count()
-    return onp.split(x, num_replicas, axis)
-  elif t in (DeviceArray, DeviceConstant):
-    # TODO(mattjj): can probably improve these implementations
-    return shard_arg(axis, onp.asarray(x))
-  elif t is core.JaxTuple:
-    return list(map(partial(shard_arg, axis), t))
-  else:
-    raise TypeError(t)
+# def unshard_result_shape(axis, result_shape):
+#   if type(result_shape) is ResultArray:
+#     shape, dtype, ndim, size = result_shape
+#     shape = tuple(s * xb.get_replica_count() if i == axis else s
+#                   for i, s in enumerate(shape))
+#     return ResultArray((shape, dtype, ndim, size))
+#   else:
+#     raise NotImplementedError  # TODO
 
-def device_put_sharded(shards):
-  if type(shards) is ShardedDeviceArray:
-    return shards.device_buffers
-  elif type(shards) is list and type(shards[0]) is onp.ndarray:
-    num_replicas = xb.get_replica_count()
-    return list(map(xb.device_put, shards, range(num_replicas)))
-  else:
-    raise NotImplementedError  # TODO
 
-class ShardedDeviceArray(DeviceArray):
-  __array_priority__ = 100.
+# def execute_replicated(compiled, in_axes, pval, handle_result, *args):
+#   sharded_args = zip(*map(shard_arg, in_axes, args))
+#   input_bufs = [device_put_sharded(sharded_arg)
+#                 for sharded_arg in sharded_args]
+#   out_bufs = compiled.ExecutePerReplica(input_bufs)
+#   return pe.merge_pvals(handle_result(out_bufs), pval)
 
-  def __init__(self, axis, device_buffers, shape, dtype, ndim, size):
-    self.axis = axis
-    self.device_buffers = device_buffers
+# def shard_arg(axis, x):
+#   t = type(x)
+#   if t is ShardedDeviceArray:
+#     return x
+#   elif t is onp.ndarray:
+#     num_replicas = xb.get_replica_count()
+#     return onp.split(x, num_replicas, axis)
+#   elif t in (DeviceArray, DeviceConstant):
+#     # TODO(mattjj): can probably improve these implementations
+#     return shard_arg(axis, onp.asarray(x))
+#   elif t is core.JaxTuple:
+#     return list(map(partial(shard_arg, axis), t))
+#   else:
+#     raise TypeError(t)
 
-    self.shape = shape
-    self.dtype = dtype
-    self.ndim = ndim
-    self.size = size
+# def device_put_sharded(shards):
+#   if type(shards) is ShardedDeviceArray:
+#     return shards.device_buffers
+#   elif type(shards) is list and type(shards[0]) is onp.ndarray:
+#     num_replicas = xb.get_replica_count()
+#     return list(map(xb.device_put, shards, range(num_replicas)))
+#   else:
+#     raise NotImplementedError  # TODO
 
-    self._npy_value = None
+# class ShardedDeviceArray(DeviceArray):
+#   __array_priority__ = 100.
 
-  @property
-  def _value(self):
-    if self._npy_value is None:
-      npy_shards = [buf.to_py() for buf in self.device_buffers]
-      self._npy_value = stack_pyval_shards(self.axis, npy_shards)
-    return self._npy_value
+#   def __init__(self, axis, device_buffers, shape, dtype, ndim, size):
+#     self.axis = axis
+#     self.device_buffers = device_buffers
 
-def stack_pyval_shards(axis, shards):
-  assert shards
-  t = type(shards[0])
-  if t is onp.ndarray:
-    return onp.concatenate(shards, axis)
-  elif t is tuple:
-    return tuple(map(partial(stack_pyval_shards, axis), shards))
-  else:
-    raise TypeError(t)
+#     self.shape = shape
+#     self.dtype = dtype
+#     self.ndim = ndim
+#     self.size = size
 
-core.pytype_aval_mappings[ShardedDeviceArray] = ConcreteArray  # TODO
-pytype_aval_mappings[ShardedDeviceArray] = make_shaped_array
-canonicalize_dtype_handlers[ShardedDeviceArray] = identity
+#     self._npy_value = None
+
+#   @property
+#   def _value(self):
+#     if self._npy_value is None:
+#       npy_shards = [buf.to_py() for buf in self.device_buffers]
+#       self._npy_value = stack_pyval_shards(self.axis, npy_shards)
+#     return self._npy_value
+
+# def stack_pyval_shards(axis, shards):
+#   assert shards
+#   t = type(shards[0])
+#   if t is onp.ndarray:
+#     return onp.concatenate(shards, axis)
+#   elif t is tuple:
+#     return tuple(map(partial(stack_pyval_shards, axis), shards))
+#   else:
+#     raise TypeError(t)
+
+# core.pytype_aval_mappings[ShardedDeviceArray] = ConcreteArray  # TODO
+# pytype_aval_mappings[ShardedDeviceArray] = make_shaped_array
+# canonicalize_dtype_handlers[ShardedDeviceArray] = identity
