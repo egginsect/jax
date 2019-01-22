@@ -37,6 +37,7 @@ def identity(x): return x
 
 
 ### pmap
+# TODO express pmap in terms of chunk composed with a parallel-prim-eliminator
 
 
 def pmap(fun, name, in_vals, in_axes, out_axis_target):
