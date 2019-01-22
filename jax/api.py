@@ -51,7 +51,7 @@ map = safe_map
 zip = safe_zip
 
 
-def jit(fun, static_argnums=()):
+def jit(fun, static_argnums=(), **params):
   """Sets up `fun` for just-in-time compilation with XLA.
 
   Args:
@@ -76,7 +76,7 @@ def jit(fun, static_argnums=()):
     args_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, dyn_args))
     check_args(args_flat)
     jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
-    out_flat = xla.xla_call(jaxtree_fun, *args_flat)
+    out_flat = xla.xla_call(jaxtree_fun, *args_flat, **params)
     return build_tree(out_tree(), out_flat)
 
   f_jitted.__name__ = "jit({})".format(f_jitted.__name__)

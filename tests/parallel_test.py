@@ -23,7 +23,7 @@ from absl.testing import parameterized
 import jax.numpy as np
 from jax import test_util as jtu
 from jax import lax
-from jax.api import pmap, papply, make_jaxpr
+from jax.api import pmap, papply, jit, make_jaxpr
 from jax.interpreters.parallel import psum, scatter_like
 
 from jax.config import config
@@ -45,15 +45,18 @@ class PmapTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def testLogSoftmax(self):
-
-    def f(x):
-      return x - np.log(psum(np.exp(x), 'i'))
-
+    f = lambda x: x - np.log(psum(np.exp(x), 'i'))
     x = onp.log(onp.arange(1., 10., dtype=onp.float32))
-
     ans = pmap(f, axis_name='i')(x)
     expected = x - onp.log(onp.sum(onp.exp(x)))
     self.assertAllClose(ans, expected, check_dtypes=False)
+
+  # def testPmapOfJit(self):
+  #   f = jit(lambda x: psum(x, 'i'))
+  #   x = onp.arange(12.)
+  #   ans = pmap(f, axis_name='i')(x)
+  #   expected = onp.sum(x)
+  #   self.assertAllClose(ans, expected, check_dtypes=False)
 
 
 class PapplyTest(jtu.JaxTestCase):
