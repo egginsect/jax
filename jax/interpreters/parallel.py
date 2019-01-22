@@ -37,7 +37,6 @@ def identity(x): return x
 
 
 ### pmap
-# TODO express pmap in terms of chunk composed with a parallel-prim-eliminator
 
 
 def pmap(fun, name, in_vals, in_axes, out_axis_target):
@@ -171,8 +170,14 @@ def psum_pmap_rule(vals, axes):
   axis, = axes
   return val.sum(axis), None
 
+def psum_parallel_translation_rule(c, in_nodes, device_grp):
+  val, = in_nodes
+  # return c.CrossReplicaSum(val, device_grp)  # TODO
+  return c.CrossReplicaSum(val)
+
 psum_p = PmapPrimitive('psum')
 pmap_primitive_rules[psum_p] = psum_pmap_rule
+xla.parallel_translation_rules[psum_p] = psum_parallel_translation_rule
 
 
 def gather(x, axis_name):
@@ -215,6 +220,7 @@ pmap_primitive_rules[scatter_p] = scatter_pmap_rule
 
 
 ### chunk
+# TODO expreses chunk in terms of a index-split composed with pmap
 
 # chunk :: spmd_traceable{G, i}[N] -> i -> axis -> chunksize
 #                                  -> spmd_traceable{G, i}[N // chunksize]

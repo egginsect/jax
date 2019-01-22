@@ -445,6 +445,107 @@ xla_call_p.def_impl(xla_call_impl)
 translations[xla_call_p] = xla_call_translation_rule
 
 
+def meshax(mesh_spec, mesh_axis):
+  spec = list(mesh_spec)
+  spec[mesh_axis] = 1
+  grps = onp.broadcast_to(onp.arange(prod(spec)).reshape(spec), mesh_spec)
+  return tuple(grps.ravel())
+
+AxisBinding = namedtuple('AxisBinding', ['arg_axis', 'mesh_axis'])
+
+def xla_pcall_impl(fun, *args, **params):
+  axis_env = params.pop('axis_env')  # :: Map AxisName AxisBinding
+  mesh_spec = params.pop('mesh_spec')  # :: [Int]
+  assert not params
+  axis_env = tuple(sorted(axis_env.items()))
+  axis_env_transposed =  # TODO
+  abstract_args = map(partial(shard_shape, mesh_spec), axis_env_transposed,
+                      map(abstractify, args))
+  compiled_fun = xla_parallel_callable(fun, axis_env, mesh_spec,
+                                       *abstract_args)
+  return compiled_fun(*args)
+
+def shard_shape(mesh_spec, axis_env, aval):
+  raise NotImplementedError  # TODO
+
+@linear_memoize
+def xla_parallel_callable(fun, axis_env, mesh_spec, *abstract_args):
+  axis_env = dict(axis_env)
+  devicegrps = {axis : meshax(mesh_spec, axis_env[axis].mesh_axis)
+                for axis in axis_env}
+  pvals = [PartialVal((aval, core.unit)) for aval in abstract_args]
+  with core.new_master(JaxprTrace, True) as master:
+    jaxpr, (pval, consts, env) = trace_to_subjaxpr(fun, master).call_wrapped(pvals)
+    assert not env  # no subtraces here (though cond might eventually need them)
+    compiled, result_shape = compile_replicated(jaxpr, devicegrps,
+                                                consts, *abstract_args)
+    del master, consts, jaxpr, env
+  handle_result = sharded_result_handler(result_shape)
+  return partial(execute_replicated, axis_env, mesh_spec, compiled, pval,
+                 handle_result)
+
+def execute_replicated(axis_env, mesh_spec, compiled, pval, handle_result,
+                       *args):
+  input_bufs = 
+  out_bufs = compiled.ExecutePerReplica(input_bufs)
+  return pe.merge_pvals(handle_result(out_bufs), pval)
+
+# { 'i': AxisBinding(arg_axis=(0, None), mesh_axis=0),
+#   'j': AxisBinding(arg_axis=(None, 2), mesh_axis=1), }
+
+
+def compile_replicated(jaxpr, devicegrps, consts, *abstract_args):
+  arg_shapes = list(map(xla_shape, abstract_args))
+  built_c = replicated_jaxpr_computation(jaxpr, devicegrps, consts, (),
+                                         *arg_shapes)
+  result_shape = xla_shape_to_result_shape(built_c.GetReturnValueShape())
+  return built_c.Compile(arg_shapes, xb.get_compile_options()), result_shape
+
+def replicated_jaxpr_computation(jaxpr, devicegrps,
+                                 const_vals, freevar_shapes, *arg_shapes):
+  c = xb.make_computation_builder("replicated_jaxpr_computation")
+
+  def read(v):
+    return env[v]
+
+  def write(v, node):
+    assert node is not None
+    env[v] = node
+
+  env = {}
+  consts_env = dict(zip(jaxpr.constvars, const_vals))
+  write(core.unitvar, c.Tuple())
+  map(write, jaxpr.constvars, map(c.Constant, const_vals))
+  map(write, jaxpr.freevars, map(c.ParameterWithShape, freevar_shapes))
+  map(write, jaxpr.invars, map(c.ParameterWithShape, arg_shapes))
+  for eqn in jaxpr.eqns:
+    if eqn.primitive in parallel_translation_rules:
+      rule = parallel_translation_rules[eqn.primitive]
+      axis_name = eqn.params['axis_name']
+      params = {k: eqn.params[k] for k in eqn.params if k != 'axis_name'}
+      ans = rule(c, in_nodes, devicegrps[axis_name], **params)
+    else:
+      in_nodes = map(read, eqn.invars)
+      in_shapes = map(c.GetShape, in_nodes)
+      if eqn.bound_subjaxprs: raise NotImplementedError  # TODO check primitive
+      ans = translation_rule(eqn.primitive)(c, *in_nodes, **eqn.params)
+
+    out_nodes = xla_destructure(c, ans) if eqn.destructure else [ans]
+    map(write, eqn.outvars, out_nodes)
+  return c.Build(read(jaxpr.outvar))
+
+parallel_translation_rules = {}
+
+
+xla_pcall_p = core.Primitive('xla_pcall')
+xla_pcall = partial(core.call_bind, xla_pcall_p)
+xla_pcall_p.def_custom_bind(xla_pcall)
+xla_pcall_p.def_impl(xla_pcall_impl)
+
+
+
+
+
 # @linear_memoize
 # def xla_replicated_callable(fun, axis_name_bindings, *abstract_args):
 #   # TODO chunk
