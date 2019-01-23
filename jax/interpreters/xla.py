@@ -445,11 +445,17 @@ xla_call_p.def_impl(xla_call_impl)
 
 translations[xla_call_p] = xla_call_translation_rule
 
+def canonicalize_axis_spec(abstract_args, spec):
+  spec = (spec,) * len(abstract_args) if type(spec) is int else spec
+  spec = map(build_axis_spec_tree, spec, abstract_args)
+  spec = tuple(tree_util.tree_flatten(spec)[0])
+  return spec
 
 def xla_pcall_impl(fun, *args, **params):
   axis_map = params.pop('axis_map')    # e.g. {'i': 0, 'j': (None, 1)}
   mesh_map = params.pop('mesh_map')    # e.g. {'i': 0, 'j': 2}
   mesh_spec = params.pop('mesh_spec')  # e.g. (2, 2, 2)
+  out_axis_map = params.pop('out_axis_map')    # e.g. {'i': 0, 'j': (None, 1)}
   assert not params
 
   flat_args, in_trees = unzip2(map(tree_flatten, args))
@@ -458,18 +464,14 @@ def xla_pcall_impl(fun, *args, **params):
 
   # canonicalize and flatten axis_map tuple-tree specs
   abstract_args = map(abstractify, args)  # abstractify is called again later
-  axis_map = {axis_name : (spec,) * len(args) if type(spec) is int else spec
-              for axis_name, spec in axis_map.items()}
-  axis_map = {axis_name : map(build_axis_spec_tree, spec, abstract_args)
-              for axis_name, spec in axis_map.items()}
-  axis_map = {axis_name: tuple(tree_util.tree_flatten(spec)[0])
+  axis_map = {axis_name : canonicalize_axis_spec(abstract_args, spec)
               for axis_name, spec in axis_map.items()}
 
   axis_map = tuple(sorted(axis_map.items()))
   mesh_map = tuple(sorted(mesh_map.items()))
   compiled_fun = xla_parallel_callable(fun, axis_map, mesh_map, mesh_spec,
                                        *map(abstractify, flat_args))
-  return compiled_fun(*args)
+  return compiled_fun(out_axis_map, *args)
 
 @linear_memoize
 def xla_parallel_callable(fun, axis_map, mesh_map, mesh_spec, *abstract_args):
@@ -497,13 +499,7 @@ def xla_parallel_callable(fun, axis_map, mesh_map, mesh_spec, *abstract_args):
                                                 consts, *abstract_args)
     del master, consts, jaxpr, env
 
-  # TODO
-  # devicemaps = (meshax2(mesh_spec, mesh_map[axis_name]) for axis_name in axis_map)
-  # handle_args = map(partial(sharded_arg_handler, devicemaps), *axis_map.values())
-  handle_result = sharded_result_handler(result_shape)
-
-  return partial(execute_replicated, axis_map, mesh_map, mesh_spec, compiled,
-                 pval, handle_result)
+  return partial(execute_replicated, axis_map, mesh_map, mesh_spec, compiled, pval)
 
 
 def build_axis_spec_tree(spec, aval):
@@ -542,11 +538,51 @@ def meshax2(mesh_spec, mesh_axis):
   grps = onp.broadcast_to(onp.arange(mesh_spec[mesh_axis]).reshape(spec), mesh_spec)
   return tuple(grps.ravel())
 
+def shard_array(mesh_spec, mesh_map, axis_map, x):
+  # axis_map , e.g. {'i': 0, 'j': None}  (axis indices)
+  # mesh_map , e.g. {'i': 0, 'k': 2}     (mesh indices0
+  # mesh_spec, (2, 4, 4)
+  # ordered index names  [i, None, k]
+  # return flat list of device buffers - one per replica
+  mesh_ndim = len(mesh_spec)
+  mesh_size = onp.prod(mesh_spec)
+  mesh_map_inverted = {v : k for k, v in mesh_map.items()}
+  ordered_idx_names = map(mesh_map_inverted.get, range(mesh_ndim))
+  axes = map(axis_map.get, ordered_idx_names)
+  xs = list_ravel(unstack_axes(mesh_spec, axes, x))
+  # import pdb; pdb.set_trace()
+
+  return map(xb.device_put, xs, range(mesh_size))
+
+def unstack_axes(mesh_spec, axes, x):
+  # axes: list of ints. logical axes of x to split, in order corresponding to
+  # mesh_spec
+  #  e.g. zeros(4, 10, 2, 6)
+  # axes  (2, 0, None[broadcast_size=10])
+  # (8,) nested lists each with (10,6) arrays
+  if axes:
+    ax0 = axes[0]
+    recur = partial(unstack_axes, mesh_spec[1:], axes[1:])
+    if ax0 is None:
+      return [recur(x)]  * mesh_spec[0]
+    else:
+      assert x.shape[ax0] == mesh_spec[0]
+      xs = split_array(x, axes[0])
+      return list(map(recur, xs))
+  else:
+    return x
+
 def execute_replicated(axis_map, mesh_map, mesh_spec, compiled, pval,
-                       handle_result, *args):
-  input_bufs = None
-  out_bufs = compiled.ExecutePerReplicaWithPythonValues(input_bufs)
-  return pe.merge_pvals(handle_result(out_bufs), pval)
+                       out_axis_map, *args):
+  # axis_map , e.g. {'i': [0, 1], 'j': [None, 2]}  (axis indices)
+  axis_maps = [{axis_name : axes[i] for axis_name, axes in axis_map.items()}
+               for i in range(len(args))]
+  input_bufs = map(partial(shard_array, mesh_spec, mesh_map), axis_maps, args)
+  out_bufs = compiled.ExecutePerReplica(zip(*input_bufs))
+
+
+
+  return merge_pvals(handle_result(out_bufs), pval)
 
 
 def compile_replicated(jaxpr, devicegrps, consts, *abstract_args):
@@ -692,3 +728,17 @@ xla_pcall_p.def_impl(xla_pcall_impl)
 # core.pytype_aval_mappings[ShardedDeviceArray] = ConcreteArray  # TODO
 # pytype_aval_mappings[ShardedDeviceArray] = make_shaped_array
 # canonicalize_dtype_handlers[ShardedDeviceArray] = identity
+
+
+def list_ravel(xs):
+  if isinstance(xs, list):
+    return concatenate(map(list_ravel, xs))
+  else:
+    return [xs]
+
+def split_array(x, axis):
+  def get_nth_subarray(n):
+    idx = [slice(None)] * x.ndim
+    idx[axis] = n
+    return x[tuple(idx)]
+  return map(get_nth_subarray, range(x.shape[axis]))
