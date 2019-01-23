@@ -565,19 +565,40 @@ def unstack_axes(mesh_spec, axes, x):
   else:
     return x
 
+def unshard_array(mesh_spec, mesh_map, axis_map, xs):
+  mesh_ndim = len(mesh_spec)
+  mesh_size = onp.prod(mesh_spec)
+  mesh_map_inverted = {v : k for k, v in mesh_map.items()}
+  ordered_idx_names = map(mesh_map_inverted.get, range(mesh_ndim))  # [i,None,k]
+  axes = map(axis_map.get, ordered_idx_names)
+
+  xs = list_sculpt(mesh_spec, iter(xs))
+  x = stack_axes(mesh_spec, axes, xs)
+  return x
+
+def list_sculpt(mesh_spec, flat_xs):
+  if mesh_spec:
+    return [list_sculpt(mesh_spec[1:], flat_xs) for _ in range(mesh_spec[0])]
+  else:
+    return next(flat_xs)
+
+def stack_axes(mesh_spec, axes, xs):
+  if mesh_spec:
+    pass  # TODO(dougalm)
+  else:
+    pass
+
 def execute_replicated(axis_map, mesh_map, mesh_spec, compiled, pval,
                        out_tree, out_axis_map, *args):
   axis_maps = [{axis_name : axes[i] for axis_name, axes in axis_map.items()}
                for i in range(len(args))]
   input_bufs = map(partial(shard_array, mesh_spec, mesh_map), axis_maps, args)
   out_bufs = compiled.ExecutePerReplica(zip(*input_bufs))
-  out = merge_pvals(zip(*out_bufs), pval)  # TODO check
   if out_tree is leaf:
-    return unshard_array(mesh_spec, mesh_map, out_axis_map, out)
+    out_shards = [merge_pvals(out_buf.to_py(), pval) for out_buf in out_bufs]
+    return unshard_array(mesh_spec, mesh_map, out_axis_map, out_shards)
   else:
-    out_axis_maps = [{axname : axes[i] for axname, axes in out_axis_map.items()}
-                     for i in range(len(out))]
-    return map(partial(unshard_array, mesh_spec, mesh_map), out_axis_maps, out)
+    raise NotImplementedError
 
 def compile_replicated(jaxpr, devicegrps, consts, *abstract_args):
   arg_shapes = list(map(xla_shape, abstract_args))
