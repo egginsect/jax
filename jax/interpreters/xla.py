@@ -572,6 +572,13 @@ def unshard_array(mesh_spec, mesh_map, axis_map, xs):
   ordered_idx_names = map(mesh_map_inverted.get, range(mesh_ndim))  # [i,None,k]
   axes = map(axis_map.get, ordered_idx_names)
 
+  example_shard = xs[0]
+  num_splits = len([i for i in axes if i is not None])
+  shape = iter(example_shard.shape)
+  newshape = [1 if i in axes else next(shape)
+              for i in range(num_splits + example_shard.ndim)]
+
+  xs = [x.reshape(newshape) for x in xs]
   xs = list_sculpt(mesh_spec, iter(xs))
   x = stack_axes(mesh_spec, axes, xs)
   return x
@@ -584,9 +591,13 @@ def list_sculpt(mesh_spec, flat_xs):
 
 def stack_axes(mesh_spec, axes, xs):
   if mesh_spec:
-    pass  # TODO(dougalm)
+    if mesh_spec[0] is None:
+      return stack_axes(mesh_spec[1:], axes[1:], xs[0])
+    else:
+      components = map(partial(stack_axes, mesh_spec[1:], axes[1:]), xs)
+      return onp.concatenate(components, axis=axes[0])
   else:
-    pass
+    return xs
 
 def execute_replicated(axis_map, mesh_map, mesh_spec, compiled, pval,
                        out_tree, out_axis_map, *args):
@@ -625,14 +636,13 @@ def replicated_jaxpr_computation(jaxpr, devicegrps,
   map(write, jaxpr.freevars, map(c.ParameterWithShape, freevar_shapes))
   map(write, jaxpr.invars, map(c.ParameterWithShape, arg_shapes))
   for eqn in jaxpr.eqns:
+    in_nodes = map(read, eqn.invars)
     if eqn.primitive in parallel_translation_rules:
       rule = parallel_translation_rules[eqn.primitive]
       axis_name = eqn.params['axis_name']
       params = {k: eqn.params[k] for k in eqn.params if k != 'axis_name'}
       ans = rule(c, in_nodes, devicegrps[axis_name], **params)
     else:
-      in_nodes = map(read, eqn.invars)
-      in_shapes = map(c.GetShape, in_nodes)
       if eqn.bound_subjaxprs: raise NotImplementedError  # TODO check primitive
       ans = translation_rule(eqn.primitive)(c, *in_nodes, **eqn.params)
 
