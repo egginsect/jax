@@ -446,53 +446,48 @@ xla_call_p.def_impl(xla_call_impl)
 translations[xla_call_p] = xla_call_translation_rule
 
 
-def meshax(mesh_spec, mesh_axis):
-  spec = list(mesh_spec)
-  spec[mesh_axis] = 1
-  grps = onp.broadcast_to(onp.arange(prod(spec)).reshape(spec), mesh_spec)
-  return tuple(grps.ravel())
-
 def xla_pcall_impl(fun, *args, **params):
   axis_map = params.pop('axis_map')    # e.g. {'i': 0, 'j': (None, 1)}
   mesh_map = params.pop('mesh_map')    # e.g. {'i': 0, 'j': 2}
   mesh_spec = params.pop('mesh_spec')  # e.g. (2, 2, 2)
   assert not params
 
-  # flatten args and axis_map values
   flat_args, in_trees = unzip2(map(tree_flatten, args))
   flat_args = concatenate(flat_args)
   fun, out_tree = flatten_fun(fun, in_trees)
 
-  # canonicalize axis_map values to have the same tree shapes as args
+  # canonicalize and flatten axis_map tuple-tree specs
+  abstract_args = map(abstractify, args)  # abstractify is called again later
   axis_map = {axis_name : (spec,) * len(args) if type(spec) is int else spec
               for axis_name, spec in axis_map.items()}
-  axis_map = {axis_name : map(build_axis_spec_tree, spec, args)
+  axis_map = {axis_name : map(build_axis_spec_tree, spec, abstract_args)
               for axis_name, spec in axis_map.items()}
-  axis_map = {axis_name: map(op.itemgetter(0), map(tree_flatten, spec))
+  axis_map = {axis_name: tuple(tree_util.tree_flatten(spec)[0])
               for axis_name, spec in axis_map.items()}
 
-  # check that all mapped axes have the right size
-  abstract_args = map(abstractify, flat_args)
-  for axis_name in axis_map:
-    if not all(axis is None or arg.shape[axis] == mesh_spec[mesh_map[axis_name]]
-               for arg, axis in zip(abstract_args, axis_map[axis_name])):
-      raise TypeError("axis size does not match mesh size")
-
-  # construct abstract values by removing mapped dimensions
-  abstract_args = map(remove_mapped_dims, abstract_args, *axis_map.values())
-
-  # compile and execute
-  axis_env = tuple(sorted(axis_env.items()))
+  axis_map = tuple(sorted(axis_map.items()))
   mesh_map = tuple(sorted(mesh_map.items()))
-  compiled_fun = xla_parallel_callable(fun, axis_env, mesh_map, mesh_spec,
-                                       *abstract_args)
+  compiled_fun = xla_parallel_callable(fun, axis_map, mesh_map, mesh_spec,
+                                       *map(abstractify, flat_args))
   return compiled_fun(*args)
 
 @linear_memoize
-def xla_parallel_callable(fun, axis_env, mesh_map, mesh_spec, *abstract_args):
-  axis_env, mesh_map = map(dict, (axis_env, mesh_map))
+def xla_parallel_callable(fun, axis_map, mesh_map, mesh_spec, *abstract_args):
+  axis_map, mesh_map = dict(axis_map), dict(mesh_map)
+
+  # check that all mapped axes have the right size
+  for axis_name in axis_map:
+    if not all(axis is None or arg.shape[axis] == mesh_spec[mesh_map[axis_name]]
+               for arg, axis in zip(abstract_args, axis_map[axis_name])):
+      msg = "axis size does not match mesh size for axis name {}"
+      raise ValueError(msg.format(axis_name))
+
+  # construct abstract args with sharded dimensions removed
+  abstract_args = map(remove_mapped_dims, abstract_args, *axis_map.values())
+
+  # process mesh_spec and mesh_map into a mapping to device groups
   devicegrps = {axis_name : meshax(mesh_spec, mesh_map[axis_name])
-                for axis_name in axis_env}
+                for axis_name in mesh_map}
 
   pvals = [PartialVal((aval, core.unit)) for aval in abstract_args]
   with core.new_master(JaxprTrace, True) as master:
@@ -501,14 +496,56 @@ def xla_parallel_callable(fun, axis_env, mesh_map, mesh_spec, *abstract_args):
     compiled, result_shape = compile_replicated(jaxpr, devicegrps,
                                                 consts, *abstract_args)
     del master, consts, jaxpr, env
+
+  # TODO
+  # devicemaps = (meshax2(mesh_spec, mesh_map[axis_name]) for axis_name in axis_map)
+  # handle_args = map(partial(sharded_arg_handler, devicemaps), *axis_map.values())
   handle_result = sharded_result_handler(result_shape)
-  return partial(execute_replicated, axis_env, mesh_map, mesh_spec, compiled,
+
+  return partial(execute_replicated, axis_map, mesh_map, mesh_spec, compiled,
                  pval, handle_result)
 
-def execute_replicated(axis_env, mesh_spec, compiled, pval, handle_result,
-                       *args):
-  input_bufs = 
-  out_bufs = compiled.ExecutePerReplica(input_bufs)
+
+def build_axis_spec_tree(spec, aval):
+  t = type(aval)
+  if t is ShapedArray:
+    assert type(spec) is int
+    return spec
+  elif t is AbstractTuple:
+    tt = type(spec)
+    if tt is int:
+      return tuple(map(partial(build_axis_spec_tree, spec), aval))
+    elif tt is tuple:
+      return tuple(map(build_axis_spec_tree, spec, aval))
+    else:
+      raise TypeError(tt)
+  else:
+    raise TypeError(t)
+
+def remove_mapped_dims(aval, *axes):
+  assert type(aval) is ShapedArray
+  axes = [d for d in axes if d is not None]
+  if len(set(axes)) != len(axes):
+    raise ValueError("multiple names mapped to the same axis")
+  shape = tuple(onp.delete(aval.shape, axes))
+  return ShapedArray(shape, aval.dtype)
+
+def meshax(mesh_spec, mesh_axis):
+  spec = list(mesh_spec)
+  spec[mesh_axis] = 1
+  grps = onp.broadcast_to(onp.arange(prod(spec)).reshape(spec), mesh_spec)
+  return tuple(grps.ravel())
+
+def meshax2(mesh_spec, mesh_axis):
+  spec = [1] * len(mesh_spec)
+  spec[mesh_axis] = mesh_spec[mesh_axis]
+  grps = onp.broadcast_to(onp.arange(mesh_spec[mesh_axis]).reshape(spec), mesh_spec)
+  return tuple(grps.ravel())
+
+def execute_replicated(axis_map, mesh_map, mesh_spec, compiled, pval,
+                       handle_result, *args):
+  input_bufs = None
+  out_bufs = compiled.ExecutePerReplicaWithPythonValues(input_bufs)
   return pe.merge_pvals(handle_result(out_bufs), pval)
 
 
