@@ -20,6 +20,7 @@ from functools import partial
 
 import numpy as onp
 import six
+from six.moves import reduce
 
 from .. import core
 from .. import linear_util as lu

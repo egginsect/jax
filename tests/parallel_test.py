@@ -151,7 +151,7 @@ class ChunkTest(jtu.JaxTestCase):
     ans = pmap(lambda x: chunk(wrap_init(f), 2, 'i', (x,), (0,), 0), 'i')(x)
     expected = 24
 
-    self.assertAllClose(ans, expected, check_dtypes=True)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
 
 if __name__ == '__main__':
