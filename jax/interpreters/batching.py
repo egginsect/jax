@@ -41,7 +41,6 @@ def batch(fun, in_vals, in_dims, out_dim_target):
     return fun.call_wrapped(*in_vals), None  # no mapped dimensions
   elif len(sizes) == 1:
     out_val, out_dim = batch_transform(fun).call_wrapped(in_vals, in_dims)
-    assert out_dim is not None
     return moveaxis(sizes.pop(), out_dim_target, out_dim, out_val)
   else:
     raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
@@ -222,12 +221,14 @@ def broadcast_batcher(prim, batched_args, batch_dims, **params):
 def defreducer(prim):
   primitive_batchers[prim] = partial(reducer_batcher, prim)
 
-def reducer_batcher(prim, batched_args, batch_dims, axes, input_shape):
+def reducer_batcher(prim, batched_args, batch_dims, axes, **params):
   operand, = batched_args
   bdim, = batch_dims
   axes = tuple(onp.where(onp.less(axes, bdim), axes, onp.add(axes, 1)))
   bdim_out = list(onp.delete(onp.arange(operand.ndim), axes)).index(bdim)
-  return prim.bind(operand, axes=axes, input_shape=operand.shape), bdim_out
+  if 'input_shape' in params:
+    params = dict(params, input_shape=operand.shape)
+  return prim.bind(operand, axes=axes, **params), bdim_out
 
 # set up primitive batches for ad_util primitives
 
