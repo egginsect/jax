@@ -29,6 +29,7 @@ from six.moves import xrange
 from ..config import flags
 from .. import core
 from .. import ad_util
+from .. import tree_util
 from ..abstract_arrays import ConcreteArray, ShapedArray, make_shaped_array, array_types
 from ..core import AbstractTuple, JaxTuple, pack, valid_jaxtype
 from ..util import partial, partialmethod, memoize, unzip2, concatenate, safe_map, prod
@@ -451,47 +452,64 @@ def meshax(mesh_spec, mesh_axis):
   grps = onp.broadcast_to(onp.arange(prod(spec)).reshape(spec), mesh_spec)
   return tuple(grps.ravel())
 
-AxisBinding = namedtuple('AxisBinding', ['arg_axis', 'mesh_axis'])
-
 def xla_pcall_impl(fun, *args, **params):
-  axis_env = params.pop('axis_env')  # :: Map AxisName AxisBinding
-  mesh_spec = params.pop('mesh_spec')  # :: [Int]
+  axis_map = params.pop('axis_map')    # e.g. {'i': 0, 'j': (None, 1)}
+  mesh_map = params.pop('mesh_map')    # e.g. {'i': 0, 'j': 2}
+  mesh_spec = params.pop('mesh_spec')  # e.g. (2, 2, 2)
   assert not params
+
+  # flatten args and axis_map values
+  flat_args, in_trees = unzip2(map(tree_flatten, args))
+  flat_args = concatenate(flat_args)
+  fun, out_tree = flatten_fun(fun, in_trees)
+
+  # canonicalize axis_map values to have the same tree shapes as args
+  axis_map = {axis_name : (spec,) * len(args) if type(spec) is int else spec
+              for axis_name, spec in axis_map.items()}
+  axis_map = {axis_name : map(build_axis_spec_tree, spec, args)
+              for axis_name, spec in axis_map.items()}
+  axis_map = {axis_name: map(op.itemgetter(0), map(tree_flatten, spec))
+              for axis_name, spec in axis_map.items()}
+
+  # check that all mapped axes have the right size
+  abstract_args = map(abstractify, flat_args)
+  for axis_name in axis_map:
+    if not all(axis is None or arg.shape[axis] == mesh_spec[mesh_map[axis_name]]
+               for arg, axis in zip(abstract_args, axis_map[axis_name])):
+      raise TypeError("axis size does not match mesh size")
+
+  # construct abstract values by removing mapped dimensions
+  abstract_args = map(remove_mapped_dims, abstract_args, *axis_map.values())
+
+  # compile and execute
   axis_env = tuple(sorted(axis_env.items()))
-  axis_env_transposed =  # TODO
-  abstract_args = map(partial(shard_shape, mesh_spec), axis_env_transposed,
-                      map(abstractify, args))
-  compiled_fun = xla_parallel_callable(fun, axis_env, mesh_spec,
+  mesh_map = tuple(sorted(mesh_map.items()))
+  compiled_fun = xla_parallel_callable(fun, axis_env, mesh_map, mesh_spec,
                                        *abstract_args)
   return compiled_fun(*args)
 
-def shard_shape(mesh_spec, axis_env, aval):
-  raise NotImplementedError  # TODO
-
 @linear_memoize
-def xla_parallel_callable(fun, axis_env, mesh_spec, *abstract_args):
-  axis_env = dict(axis_env)
-  devicegrps = {axis : meshax(mesh_spec, axis_env[axis].mesh_axis)
-                for axis in axis_env}
+def xla_parallel_callable(fun, axis_env, mesh_map, mesh_spec, *abstract_args):
+  axis_env, mesh_map = map(dict, (axis_env, mesh_map))
+  devicegrps = {axis_name : meshax(mesh_spec, mesh_map[axis_name])
+                for axis_name in axis_env}
+
   pvals = [PartialVal((aval, core.unit)) for aval in abstract_args]
   with core.new_master(JaxprTrace, True) as master:
     jaxpr, (pval, consts, env) = trace_to_subjaxpr(fun, master).call_wrapped(pvals)
-    assert not env  # no subtraces here (though cond might eventually need them)
+    assert not env
     compiled, result_shape = compile_replicated(jaxpr, devicegrps,
                                                 consts, *abstract_args)
     del master, consts, jaxpr, env
   handle_result = sharded_result_handler(result_shape)
-  return partial(execute_replicated, axis_env, mesh_spec, compiled, pval,
-                 handle_result)
+  return partial(execute_replicated, axis_env, mesh_map, mesh_spec, compiled,
+                 pval, handle_result)
 
 def execute_replicated(axis_env, mesh_spec, compiled, pval, handle_result,
                        *args):
   input_bufs = 
   out_bufs = compiled.ExecutePerReplica(input_bufs)
   return pe.merge_pvals(handle_result(out_bufs), pval)
-
-# { 'i': AxisBinding(arg_axis=(0, None), mesh_axis=0),
-#   'j': AxisBinding(arg_axis=(None, 2), mesh_axis=1), }
 
 
 def compile_replicated(jaxpr, devicegrps, consts, *abstract_args):
